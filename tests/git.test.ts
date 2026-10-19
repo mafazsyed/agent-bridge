@@ -21,7 +21,7 @@ test('implementation worktree preserves source including dirty files and trailin
     writeFileSync(join(source, 'file.txt'), 'user-uncommitted');
     const resolved = resolveBase(source, 'HEAD');
     assert.equal(resolved.repo, source);
-    const c: Conversation = { id: randomUUID(), cwd: join(base, process.platform === 'win32' ? 'isolated with spaces' : 'isolated '), sourceCwd: source, mode: 'write', model: 'test', effort: 'high', baseCommit: resolved.commit, branch: 'agent-bridge/test', sessionInitialized: false, createdAt: 1 };
+    const c: Conversation = { id: randomUUID(), runtime: 'claude', nativeId: null, cwd: join(base, process.platform === 'win32' ? 'isolated with spaces' : 'isolated '), sourceCwd: source, mode: 'write', model: 'test', effort: 'high', baseCommit: resolved.commit, branch: 'agent-bridge/test', sessionInitialized: false, createdAt: 1 };
     prepareWorktree(c);
     assert.equal(readFileSync(join(c.cwd, 'file.txt'), 'utf8'), 'committed');
     writeFileSync(join(c.cwd, 'file.txt'), 'worker-edits');

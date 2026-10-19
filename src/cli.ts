@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { config } from './config.js';
-import { Bridge, publicRun } from './service.js';
+import { Bridge, publicRun, requireTopLevel } from './service.js';
 import { serve } from './mcp.js';
 import { discoverModels } from './models.js';
+import { discoverCodexModels } from './codex-models.js';
+import { BridgeError } from './types.js';
 
 async function input(): Promise<string> {
   let text = '';
@@ -16,19 +18,25 @@ async function input(): Promise<string> {
 async function main() {
   const [command, arg, extra, cursor] = process.argv.slice(2);
   if (!command || command === '--help') {
-    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models                  List Claude models and effort capabilities\n  start                   Read start_run JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor                  Check the local CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code. See README for permissions and recovery.');
+    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models [claude|codex]    List native models and effort capabilities\n  start                   Read start_run JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor [claude|codex]    Check the native CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code or Codex. See README for permissions and recovery.');
     return;
   }
-  const settings = config(command === 'doctor' || command === 'models');
+  const settings = config(false);
   if (command === 'models') {
-    console.log(JSON.stringify(await discoverModels(settings), null, 2));
+    if (arg && !['claude', 'codex'].includes(arg)) throw new BridgeError('invalid_runtime', 'Runtime must be claude or codex.');
+    console.log(JSON.stringify(await (arg === 'codex' ? discoverCodexModels(settings) : discoverModels(settings)), null, 2));
     return;
   }
   if (command === 'doctor') {
-    const version = execFileSync(settings.executable, ['--version'], { encoding: 'utf8', timeout: 10_000, windowsHide: true }).trim();
-    console.log(JSON.stringify({ node: process.version, claude: version, executable: settings.executable, stateDir: settings.stateDir, maxActive: settings.maxActive, authentication: 'Not tested; run claude auth login if a delegated task reports auth_required.' }, null, 2));
+    if (arg && !['claude', 'codex'].includes(arg)) throw new BridgeError('invalid_runtime', 'Runtime must be claude or codex.');
+    const runtime = arg ?? 'claude';
+    const executable = runtime === 'codex' ? settings.codexExecutable : settings.executable;
+    if (!executable) throw new BridgeError('cli_missing', `Install the native ${runtime} CLI.`);
+    const version = execFileSync(executable, ['--version'], { encoding: 'utf8', timeout: 10_000, windowsHide: true }).trim();
+    console.log(JSON.stringify({ node: process.version, runtime, version, executable, stateDir: settings.stateDir, maxActive: settings.maxActive, authentication: `Not tested; use ${runtime === 'claude' ? 'claude auth login' : 'codex login'} if a task reports auth_required.` }, null, 2));
     return;
   }
+  if (['start', 'cancel', 'answer', 'prune'].includes(command)) requireTopLevel();
   const bridge = new Bridge(settings);
   if (command === 'mcp') { await serve(bridge); return; }
   try {
@@ -46,7 +54,7 @@ async function main() {
       case 'prune': {
         const days = Number(arg ?? 30);
         if (!Number.isFinite(days) || days < 1) throw new Error('Prune days must be at least 1');
-        result = { prunedRuns: bridge.store.prune(Date.now() - days * 86_400_000), retained: 'Idempotency receipts, conversation identities and worktrees. Claude maintains its own session transcripts separately.' };
+        result = { prunedRuns: bridge.store.prune(Date.now() - days * 86_400_000), retained: 'Idempotency receipts, conversation identities and worktrees. Each runtime maintains its native session transcripts separately.' };
         break;
       }
       case 'runs': bridge.reconcile(); result = bridge.store.listRuns().map(publicRun); break;

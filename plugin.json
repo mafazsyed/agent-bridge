@@ -2,6 +2,6 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agent-bridge",
   "version": "0.1.0",
-  "description": "Persistent Claude delegation, reviews and isolated implementation tasks",
+  "description": "Persistent Claude and Codex delegation, reviews and isolated implementation tasks",
   "extensions": { "com.openai": { "requires_local_executor": true } }
 }

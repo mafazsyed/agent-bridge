@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { BridgeError, TERMINAL, type Conversation, type Effort, type Event, type Permission, type Run, type RunStatus } from './types.js';
+import { BridgeError, NATIVE_DEFAULT, QUESTION_TOOLS, TERMINAL, type Conversation, type Effort, type Event, type Permission, type Run, type RunStatus } from './types.js';
 
 export interface CreateRunInput {
   conversation: Conversation;
@@ -21,12 +21,18 @@ type Param = string | number | null;
 
 const ACTIVE = `status IN ('queued', 'running', 'needs_input')`;
 
+const SCHEMA_VERSION = 2;
+const RUNTIME_COLUMN = `runtime TEXT NOT NULL DEFAULT 'claude' CHECK (runtime IN ('claude', 'codex'))`;
+
 // Private columns: ord gives deterministic insertion order, ack_unknown_through is the highest unknown
 // run ord a request explicitly acknowledged, and consumed lets a worker take a decision at most once.
+// Indexes on migrated columns are created by the migration, after those columns exist.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS conversations (
   ord INTEGER PRIMARY KEY AUTOINCREMENT,
   id TEXT NOT NULL UNIQUE,
+  ${RUNTIME_COLUMN},
+  native_id TEXT,
   cwd TEXT NOT NULL,
   source_cwd TEXT NOT NULL,
   mode TEXT NOT NULL CHECK (mode IN ('review', 'write')),
@@ -90,6 +96,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS permissions_one_pending ON permissions(run_id)
 
 const toConversation = (r: Row): Conversation => ({
   id: r.id as string,
+  runtime: r.runtime as Conversation['runtime'],
+  nativeId: r.native_id as string | null,
   cwd: r.cwd as string,
   sourceCwd: r.source_cwd as string,
   mode: r.mode as Conversation['mode'],
@@ -143,6 +151,7 @@ const toPermission = (r: Row): Permission => ({
 
 const isTerminal = (status: unknown) => TERMINAL.includes(status as RunStatus);
 const limitOf = (n: number) => Math.max(0, Math.trunc(n));
+const bounded = (value: unknown, max: number) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
 
 export class Store {
   private readonly db: DatabaseSync;
@@ -158,16 +167,22 @@ export class Store {
     closeSync(openSync(file, 'a', 0o600));
     chmodSync(file, 0o600);
     this.db = new DatabaseSync(file, { timeout: 5000 });
-    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) > 1) {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) > SCHEMA_VERSION) {
       this.db.close();
       throw new BridgeError('schema_too_new', 'This state directory was upgraded by a newer Agent Bridge. Use that version.');
     }
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;');
     this.tx(() => this.db.exec(SCHEMA));
+    // Each step is idempotent and runs under BEGIN IMMEDIATE, so concurrent openers migrate exactly once.
+    // Version 1 conversations were all Claude sessions, which use the conversation ID as session ID (native_id NULL).
     this.tx(() => {
       const columns = this.all('PRAGMA table_info(runs)');
       if (!columns.some(c => c.name === 'worker_identity')) this.db.exec('ALTER TABLE runs ADD COLUMN worker_identity TEXT');
-      this.db.exec('PRAGMA user_version = 1');
+      const conversationColumns = this.all('PRAGMA table_info(conversations)');
+      if (!conversationColumns.some(c => c.name === 'runtime')) this.db.exec(`ALTER TABLE conversations ADD COLUMN ${RUNTIME_COLUMN}`);
+      if (!conversationColumns.some(c => c.name === 'native_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN native_id TEXT');
+      this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS conversations_native ON conversations(runtime, native_id)');
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     });
   }
 
@@ -213,9 +228,9 @@ export class Store {
         }
       } else {
         this.run(
-          `INSERT INTO conversations (id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          c.id, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt,
+          `INSERT INTO conversations (id, runtime, native_id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          c.id, c.runtime, c.nativeId, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt,
         );
       }
       const id = randomUUID();
@@ -307,6 +322,41 @@ export class Store {
     if (this.run('UPDATE conversations SET session_initialized = 1 WHERE id = ?', conversationId) === 0) {
       throw new BridgeError('not_found', `Conversation ${conversationId} not found`);
     }
+  }
+
+  // Compare-and-swap the conversation's native session identity, fenced by the run lease. Rebinding the
+  // same identity is idempotent; a different one is refused. Where this run asked for the native default,
+  // record the model/effort the runtime actually applied (a null effort means it did not report one).
+  bindNativeSession(runId: string, token: string, nativeId: string, model: string, effort: string | null): Conversation {
+    if (!bounded(nativeId, 256)) throw new BridgeError('invalid_argument', 'Native session ID must be a nonempty string of at most 256 characters.');
+    if (!bounded(model, 150)) throw new BridgeError('invalid_argument', 'Applied model must be a nonempty string of at most 150 characters.');
+    if (effort !== null && !bounded(effort, 64)) throw new BridgeError('invalid_argument', 'Applied effort must be null or a nonempty string of at most 64 characters.');
+    return this.tx(() => {
+      const r = this.one(
+        `SELECT r.status, r.worker_token, r.model, r.effort, c.id AS conversation_id, c.runtime, c.native_id, c.model AS conversation_model, c.effort AS conversation_effort
+         FROM runs r JOIN conversations c ON c.id = r.conversation_id WHERE r.id = ?`,
+        runId,
+      );
+      if (!r) throw new BridgeError('not_found', `Run ${runId} not found`);
+      if (r.worker_token !== token || isTerminal(r.status)) throw new BridgeError('lease_lost', `Worker does not own active run ${runId}`);
+      if (r.status === 'queued') throw new BridgeError('invalid_state', `Run ${runId} has not been claimed`);
+      const conversationId = r.conversation_id as string;
+      if (r.native_id !== null && r.native_id !== nativeId) {
+        throw new BridgeError('session_identity_changed', 'Runtime returned a different native session; refusing silent replacement.');
+      }
+      if (this.one('SELECT 1 FROM conversations WHERE runtime = ? AND native_id = ? AND id <> ?', r.runtime as string, nativeId, conversationId)) {
+        throw new BridgeError('session_identity_changed', 'Native session already belongs to another conversation.');
+      }
+      const runModel = r.model === NATIVE_DEFAULT ? model : r.model as string;
+      const runEffort = r.effort === NATIVE_DEFAULT ? effort ?? NATIVE_DEFAULT : r.effort as string;
+      const pin = (saved: unknown, requested: unknown, applied: string) => saved === NATIVE_DEFAULT && requested === NATIVE_DEFAULT ? applied : saved as string;
+      this.run(
+        `UPDATE conversations SET native_id = ?, session_initialized = 1, model = ?, effort = ? WHERE id = ? AND (native_id IS NULL OR native_id = ?)`,
+        nativeId, pin(r.conversation_model, r.model, runModel), pin(r.conversation_effort, r.effort, runEffort), conversationId, nativeId,
+      );
+      this.run('UPDATE runs SET model = ?, effort = ?, updated_at = ? WHERE id = ? AND worker_token = ?', runModel, runEffort, this.now(), runId, token);
+      return this.getConversation(conversationId);
+    });
   }
 
   appendEvent(runId: string, type: string, data: unknown): Event {
@@ -412,12 +462,12 @@ export class Store {
         this.run(`UPDATE permissions SET decision = 'expired' WHERE id = ?`, id);
         return null;
       }
-      if (decision === 'allow' && p.tool === 'AskUserQuestion') {
+      if (decision === 'allow' && QUESTION_TOOLS.includes(p.tool as string)) {
         const questions = (JSON.parse(p.input as string).questions ?? []) as Array<{ question?: unknown }>;
-        if (!answers || !questions.length || questions.some(q => typeof q.question !== 'string' || typeof answers[q.question] !== 'string' || !answers[q.question]?.trim())) {
+        if (!answers || !Array.isArray(questions) || !questions.length || questions.some(q => typeof q?.question !== 'string' || typeof answers[q.question] !== 'string' || !answers[q.question]?.trim())) {
           throw new BridgeError('answers_required', 'Supply a nonempty answer for each exact question text.');
         }
-      } else if (answers !== undefined) throw new BridgeError('invalid_argument', 'answers are only accepted when allowing AskUserQuestion.');
+      } else if (answers !== undefined) throw new BridgeError('invalid_argument', 'answers are only accepted when allowing a question.');
       this.run(`UPDATE permissions SET decision = ?, answers = ? WHERE id = ? AND decision = 'pending'`, decision, answers ? JSON.stringify(answers) : null, id);
       return this.getPermission(id);
     });
@@ -443,6 +493,23 @@ export class Store {
         if ((p.expires_at as number) > now) return null;
         this.run(`UPDATE permissions SET decision = 'expired' WHERE id = ?`, id);
       }
+      this.run('UPDATE permissions SET consumed = 1 WHERE id = ?', id);
+      this.run(`UPDATE runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'needs_input'`, now, p.run_id as string);
+      return this.getPermission(id);
+    });
+  }
+
+  // The native runtime resolved a request itself (e.g. it timed out or was withdrawn), so no answer can be
+  // delivered. Expire a pending request and close it to consumption; resume the run only while it is still
+  // active (and owned by token, when given). An already consumed request is returned unchanged.
+  expirePermission(id: string, token?: string): Permission {
+    const now = this.now();
+    return this.tx(() => {
+      const p = this.one('SELECT p.decision, p.consumed, r.id AS run_id, r.status, r.worker_token FROM permissions p JOIN runs r ON r.id = p.run_id WHERE p.id = ?', id);
+      if (!p) throw new BridgeError('not_found', `Permission ${id} not found`);
+      if (token !== undefined && (p.worker_token !== token || isTerminal(p.status))) throw new BridgeError('lease_lost', `Worker does not own active run ${p.run_id as string}`);
+      if (p.consumed === 1) return this.getPermission(id);
+      this.run(`UPDATE permissions SET decision = 'expired' WHERE id = ? AND decision = 'pending'`, id);
       this.run('UPDATE permissions SET consumed = 1 WHERE id = ?', id);
       this.run(`UPDATE runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'needs_input'`, now, p.run_id as string);
       return this.getPermission(id);

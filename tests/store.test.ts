@@ -22,7 +22,7 @@ function stateDir() {
 class Clock { t = 1_000; now = () => this.t; }
 
 const conversation = (id: string = randomUUID()): Conversation => ({
-  id, cwd: '/work', sourceCwd: '/src', mode: 'review', model: 'claude-opus-5-5', effort: 'high',
+  id, runtime: 'claude', nativeId: null, cwd: '/work', sourceCwd: '/src', mode: 'review', model: 'claude-opus-5-5', effort: 'high',
   baseCommit: null, branch: null, sessionInitialized: false, createdAt: 1_000,
 });
 

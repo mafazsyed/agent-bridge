@@ -32,6 +32,16 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
     assert.equal((waiting.structuredContent as any).result.permissions[0].id, permission.id);
     const badAnswer = await client.callTool({ name: 'answer_permission', arguments: { permissionId: permission.id, decision: 'allow' } });
     assert.equal(badAnswer.isError, true);
+    const depth = process.env.AGENT_BRIDGE_DELEGATION_DEPTH;
+    process.env.AGENT_BRIDGE_DELEGATION_DEPTH = '1';
+    try {
+      const nestedAnswer = await client.callTool({ name: 'answer_permission', arguments: { permissionId: permission.id, decision: 'allow', answers: { 'Which colour?': 'Blue' } } });
+      assert.equal(nestedAnswer.isError, true);
+      const nestedCancel = await client.callTool({ name: 'cancel_run', arguments: { runId: payload.run.id } });
+      assert.equal(nestedCancel.isError, true);
+      assert.equal(bridge.store.getRun(payload.run.id).cancelRequested, false);
+      assert.equal(bridge.store.getPermission(permission.id).decision, 'pending');
+    } finally { if (depth === undefined) delete process.env.AGENT_BRIDGE_DELEGATION_DEPTH; else process.env.AGENT_BRIDGE_DELEGATION_DEPTH = depth; }
     const answer = await client.callTool({ name: 'answer_permission', arguments: { permissionId: permission.id, decision: 'allow', answers: { 'Which colour?': 'Blue' } } });
     assert.equal(answer.isError, undefined);
     assert.deepEqual(bridge.store.consumePermission(permission.id, 'fixture')?.answers, { 'Which colour?': 'Blue' });

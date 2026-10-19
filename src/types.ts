@@ -1,9 +1,22 @@
 export type Mode = 'review' | 'write';
-export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type Runtime = 'claude' | 'codex';
+export const RUNTIMES = ['claude', 'codex'] as const satisfies readonly Runtime[];
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly ClaudeEffort[];
+export const isClaudeEffort = (effort: string): effort is ClaudeEffort => (CLAUDE_EFFORTS as readonly string[]).includes(effort);
+// Claude levels are a fixed enum; Codex levels come from the native model catalogue.
+export type Effort = string;
+// Codex model/effort placeholder meaning "the native default"; replaced by the actual value once a session binds.
+export const NATIVE_DEFAULT = 'default';
+// Permission tools answered with { [exact question text]: answer }.
+export const QUESTION_TOOLS: readonly string[] = ['AskUserQuestion', 'codex.userInput'];
 export type RunStatus = 'queued' | 'running' | 'needs_input' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export const TERMINAL: readonly RunStatus[] = ['succeeded', 'failed', 'cancelled', 'unknown'];
 export interface Conversation {
   id: string;
+  runtime: Runtime;
+  // Native session/thread identifier when it differs from id (Codex); null until bound, and for Claude.
+  nativeId: string | null;
   cwd: string;
   sourceCwd: string;
   mode: Mode;
@@ -53,6 +66,7 @@ export interface StartInput {
   requestKey: string;
   prompt: string;
   conversationId?: string;
+  runtime?: Runtime;
   cwd?: string;
   mode?: Mode;
   model?: string;

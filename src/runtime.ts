@@ -43,7 +43,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     } finally { release(); }
   };
   const options: Options = {
-    ...claudeOptions(settings), cwd: conversation.cwd, model: run.model, effort: run.effort,
+    ...claudeOptions(settings), cwd: conversation.cwd, model: run.model, effort: run.effort as Options['effort'],
     ...(conversation.sessionInitialized ? { resume: conversation.id } : { sessionId: conversation.id }),
     abortController: abort, tools: conversation.mode === 'review' ? REVIEW_TOOLS : WRITE_TOOLS,
     allowedTools: ['Read', 'Glob', 'Grep', ...(conversation.mode === 'write' ? ['Edit', 'Write'] : [])],

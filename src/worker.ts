@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { Store } from './store.js';
 import { BridgeError, TERMINAL } from './types.js';
 import { runClaude, errorCode, resultErrorCode } from './runtime.js';
+import { runCodex } from './codex-runtime.js';
 import { prepareWorktree } from './git.js';
 import { processIdentity, workerAlive } from './process-identity.js';
 import { appendFileSync, chmodSync } from 'node:fs';
@@ -26,7 +27,7 @@ async function main() {
     if (!identity) throw new BridgeError('worker_identity_unavailable', 'Cannot establish a reliable process identity. No model turn started; retry when the machine is responsive.');
     attached = store.attachWorker(runId, token, process.pid, identity);
     if (!attached) return;
-    const settings = { ...config(), stateDir };
+    const settings = { ...config(false), stateDir };
     while (!store.claimRun(runId, token, settings.maxActive)) {
       const current = store.getRun(runId);
       if (TERMINAL.includes(current.status)) return;
@@ -56,12 +57,15 @@ async function main() {
         if (reason) abort.abort();
       } catch { reason = 'lease_lost'; abort.abort(); }
     }, 300);
-    const result = await runClaude(settings, store, run, conversation, token, abort);
-    const text = ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000);
+    const result = conversation.runtime === 'codex' ? await runCodex(settings, store, run, conversation, token, abort) : await (async () => {
+      const value = await runClaude(settings, store, run, conversation, token, abort);
+      return { text: 'result' in value ? value.result : value.errors.join('\n'), success: !value.is_error, errorCode: resultErrorCode(value) };
+    })();
+    const text = result.text.slice(0, 1_000_000);
     // An explicit success is authoritative, even if cancellation raced its delivery.
-    if (!result.is_error) store.finishRun(runId, token, 'succeeded', text, null);
+    if (result.success) store.finishRun(runId, token, 'succeeded', text, null);
     else if (reason) store.finishRun(runId, token, reason === 'cancelled' ? 'cancelled' : 'unknown', text, reason);
-    else store.finishRun(runId, token, 'failed', text, resultErrorCode(result));
+    else store.finishRun(runId, token, 'failed', text, result.errorCode);
   } catch (error) {
     const code = error instanceof BridgeError ? error.code : errorCode(String(error));
     const status = reason === 'cancelled' ? 'cancelled' : reason || ['unknown_outcome', 'session_identity_changed'].includes(code) ? 'unknown' : 'failed';

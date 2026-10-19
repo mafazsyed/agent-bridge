@@ -67,6 +67,26 @@ Windows acceptance found that synchronous temporary-directory cleanup blocked th
 
 Opus 5.5 reviewed the design and then the implementation through native Agent Bridge runs. It found no blocking correctness, privacy or lifecycle issue, and recommended preserving results when final cleanup fails; that recommendation was implemented with a regression test. The review run also confirmed a real host can omit applied effort, which the bridge marks unreported. Reviews were read-only; the implementing agent ran and inspected the tests independently.
 
+## Claude Code → Codex acceptance
+
+The reverse adapter uses the native Codex app-server protocol. Generated schemas from Codex 0.163.0 were used to check the request/response fields. It retains a separate native thread ID and uses the same ledger, queue and worktree lifecycle as Claude jobs.
+
+Authenticated native acceptance ran on macOS (Node 26.5.0), Linux x64 and Windows 11 x64 (both Node 24.22.0), using Codex 0.163.0 and the runtime catalogue's default `gpt-6.1-sol` with reported `low` effort. Each host exercised catalogue discovery, a real read of a random fixture, a requested write in review mode leaving no file, remembered context on follow-up, a write in the assigned worktree leaving the source checkout unchanged, a one-time command approval, cancellation and resuming the same native conversation afterward.
+
+A separate real Claude Code host, using Opus 5.5/high, called the new MCP tools on each OS. It discovered Codex's models, started a review, waited for completion and continued that saved conversation. Independent ledger checks verified two successful Codex turns sharing one native identity and recalling the fixture marker without rereading it. These were actual host-to-MCP-to-runtime calls, not simulated host decisions. Other models in the catalogues were not exhaustively tested.
+
+Native acceptance uncovered and corrected the Windows executable lookup for current npm layouts, inherited MCP map merging (individual servers must be disabled), and an unnecessary override of Windows' configured sandbox. Windows now keeps its native implementation. Approvals are checked against exact fixture actions, including native shell wrapping. On this Windows host, sandboxed commands started over SSH intermittently failed with native runner pipe timeouts or error 267. A direct native `command/exec` probe reproduced the failure without Agent Bridge's turn adapter. Running the same executable and command under an interactive Windows logon read the fixture successfully and rejected the write with `EPERM`; the file remained absent. Use an interactive Windows session for native sandboxed commands on this host. The bridge does not weaken the sandbox to work around SSH session restrictions.
+
+Ubuntu's AppArmor configuration blocked unprivileged user namespaces used by Codex's bubblewrap sandbox. The owner installed a narrow profile for a root-owned isolated Codex binary and its official bundled execution helper. Global AppArmor restrictions remained enabled. This host setup was required for the native test; Agent Bridge does not install profiles, elevate itself or fall back to an unsandboxed runtime.
+
+New automated cases cover v1 ledger migration and fingerprint stability, immutable runtime selection, native ID binding and lease fencing, real stdio framing and pagination, disabled inherited MCP servers, native sandbox checks, early completion before the start acknowledgement, transport failure before/after dispatch, wrong-thread requests, questions, withdrawn approvals, refusal of review escalation, process-tree cancellation and bounded model discovery. Protocol fixtures make these cases deterministic; they supplement the native checks above.
+
+Opus 5.5 reviewed the implementation and re-reviewed the corrections. Terminal-input approvals are refused rather than misrepresented as command approvals; refreshed patch snapshots invalidate stale decisions; startup cancellation closes pending RPCs; and an emergency owner exit synchronously stops the owned app-server tree. Regression tests cover each path. Native-rule trust and Windows sandbox-account process cleanup limits are explicit in the documentation.
+
+The final automated suite passed 72 tests on Mac and Linux, and 71 on Windows with the POSIX-only trailing-space path case skipped. Typechecks and builds passed on all three hosts. The native Windows lifecycle suite also passed from an interactive session: its review write was denied, its isolated edit and one-time command approval succeeded, and the actual sandboxed Node PID exited after cancellation. The same native PID check passed on Mac; Linux resolves namespace PIDs to the corresponding host process before checking exit.
+
+The Mac's Claude Code user configuration now registers Agent Bridge, and its `codex-delegation` skill is installed. A fresh native connection check reports the server connected. The repository provides the same setup instructions for other machines; acceptance profiles do not silently install user-wide MCP configuration there.
+
 ## Limits
 
 - Native acceptance covers the specific Mac, Windows and Linux configurations above, with Opus 5.5 and a Sonnet 5.5 follow-up. It does not establish compatibility with every shell, operating-system version, model or enterprise policy.
@@ -76,4 +96,4 @@ Opus 5.5 reviewed the design and then the implementation through native Agent Br
 - The bridge refuses missing transcripts and incomplete worktrees rather than silently starting fresh or resetting files.
 - The plugin packaging is included, but this validation used MCP clients/CLI directly; marketplace installation is not claimed.
 
-Real-model scripts are optional and consume Claude account usage. Local detailed evidence is ignored under `.local/`; do not commit private transcripts or state directories.
+Real-model scripts are optional and consume the selected native account usage. Local detailed evidence is ignored under `.local/`; do not commit private transcripts or state directories.
