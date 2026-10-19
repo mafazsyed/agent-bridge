@@ -12,7 +12,8 @@ import { pathToFileURL } from 'node:url';
 // Opt-in: calls the user's authenticated Claude runtime and consumes model usage.
 if (process.env.AGENT_BRIDGE_LIVE !== '1') throw new Error('Set AGENT_BRIDGE_LIVE=1 to authorize live model calls. Build first.');
 const root = resolve('.local/live-' + Date.now());
-const workspace = join(root, 'workspace ');
+// Win32 normalizes trailing spaces; keep embedded spaces on every platform.
+const workspace = join(root, process.platform === 'win32' ? 'workspace with spaces' : 'workspace ');
 mkdirSync(workspace, { recursive: true });
 const marker = 'violet-' + randomUUID();
 writeFileSync(join(workspace, 'fixture.txt'), marker);
