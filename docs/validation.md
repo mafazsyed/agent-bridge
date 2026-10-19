@@ -20,7 +20,7 @@ One native Claude absolute-path read on this external volume was rejected by its
 
 `npm run check` runs TypeScript checks, serialized tests, then a build. The tests cover SQLite transactions across processes, idempotency, queued turns, global concurrency, uncertain outcomes, cancellation, permission expiry/one-time answers, path restrictions, case variants, symlinks, incomplete worktree setup, lost launches, process identity after stale heartbeats, MCP handlers and detached workers surviving their client.
 
-Process tests exercise the real compiled CLI, SDK transport, workers, SQLite and stdio MCP. Only the model process is a deterministic protocol fixture. They do not prove native Claude compatibility on other operating systems. CI is configured to run this suite on Node 24 on macOS, Windows and Linux.
+Process tests exercise the real compiled CLI, SDK transport, workers, SQLite and stdio MCP. Only the model process is a deterministic protocol fixture. They do not prove native Claude compatibility on other operating systems. The first GitHub CI run passed this suite on Node 24 on macOS, Windows and Linux: [run 39307054507](https://github.com/mafazsyed/agent-bridge/actions/runs/39307054507). This used the same application source as the private-preview commit; later CI setup changes do not add native-model coverage.
 
 The final local suite passed 28 tests. Opus re-reviewed the corrections and found no remaining blocker for the macOS private preview. Its review is not a substitute for native acceptance on other platforms.
 
