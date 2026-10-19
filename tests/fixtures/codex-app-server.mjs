@@ -28,8 +28,8 @@ createInterface({ input: process.stdin }).on('line', async line => {
       if (scenario === 'before-dispatch-crash') { process.exit(1); break; }
       const write = m.params.sandbox === 'workspace-write';
       reply(m, { thread: { id: scenario === 'wrong-resume' ? 'other-thread' : threadId }, model: m.params.model,
-        reasoningEffort: m.params.config.model_reasoning_effort, cwd: m.params.cwd, approvalPolicy: m.params.approvalPolicy, approvalsReviewer: m.params.approvalsReviewer,
-        sandbox: scenario === 'unsafe' ? { type: 'dangerFullAccess' } : write ? { type: 'workspaceWrite', writableRoots: [m.params.cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } : { type: 'readOnly', networkAccess: false } }); break;
+        reasoningEffort: m.params.config.model_reasoning_effort, cwd: m.params.cwd, approvalPolicy: scenario === 'policy-downgrade' ? 'never' : m.params.approvalPolicy, approvalsReviewer: scenario === 'reviewer-downgrade' ? 'user' : m.params.approvalsReviewer,
+        sandbox: scenario === 'unsafe' || m.params.sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' } : write ? { type: 'workspaceWrite', writableRoots: [m.params.cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } : { type: 'readOnly', networkAccess: false } }); break;
     }
     case 'mcpServerStatus/list': reply(m, { data: [{ name: 'bridge.with.dot', runtimeStatus: scenario === 'mcp-enabled' ? 'ready' : 'disabled' }], nextCursor: null }); break;
     case 'turn/start': {

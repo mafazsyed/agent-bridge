@@ -87,6 +87,31 @@ The final automated suite passed 72 tests on Mac and Linux, and 71 on Windows wi
 
 The Mac's Claude Code user configuration now registers Agent Bridge, and its `codex-delegation` skill is installed. A fresh native connection check reports the server connected. The repository provides the same setup instructions for other machines; acceptance profiles do not silently install user-wide MCP configuration there.
 
+## Native permission selectors (2026-10-19)
+
+The default controlled-delegation policy is preserved. New native selections are stored independently per run, with a saved conversation default and explicit null reset. Schema v3 adds nullable JSON columns; v1/v2 migration, old request fingerprints, resume overrides and queued-run isolation have regression coverage.
+
+| Check | macOS | Ubuntu | Windows |
+| --- | --- | --- | --- |
+| Full automated suite | 96 passed | 96 passed | 95 passed; POSIX trailing-space case skipped |
+| Final native-permission and runtime regressions | 18 passed | 18 passed | 18 passed |
+| Typecheck and build | Passed | Passed | Passed |
+| Native Claude control discovery, no inference | All six modes confirmed | All six modes confirmed | All six modes confirmed |
+| Native Codex schema/requirements discovery | Passed | Passed | Passed |
+| Codex full-access isolated file edit | Passed | Passed | Passed |
+| Codex automatic review of harmless escalated echo | Passed, no host approval | Passed, no host approval | Passed, no host approval |
+| Codex untrusted policy file-edit approval | Passed, one exact approval | Passed, one exact approval | Passed, one exact approval |
+
+The MCP handler additionally verifies nested permission input and rejects mixed-runtime keys. Fixtures cover all six Claude choices, predispatch downgrade/refusal, model-level auto refusal, mode drift after dispatch, per-tool mode guards, protected paths, explicit callbacks, no-prompt discovery, Codex reviewer/policy downgrade, granular policy forwarding and refusal of unexpected escalation under never.
+
+The real SDK test found that a held streaming input kept a completed Claude turn open. The worker now ends the stream on the terminal result; a fixture which remains open after that result prevents regression. Claude session-limit failures now classify as rate_limited.
+
+Claude inference coverage is **partial**. On macOS, the Bridge plan run made no writes, a native default run forwarded one Write for approval and completed it, and an independent native acceptEdits probe created its fixture without approval. A Bridge acceptEdits run on this external drive correctly forwarded a native path warning: Claude classified the drive's trailing-space component as a suspicious Windows path pattern. Bridge retained that decision instead of overriding it. Native mode behavior is tested in neutral temporary directories to avoid confusing that separate runtime safeguard with a mode-selection bug.
+
+Further real Claude inference tests (including the bypass out-of-workspace deny-hook exercise, dontAsk, auto, and restored-default follow-up) were blocked by the Claude account session limit. Do not claim those native cases passed; their Bridge paths have automated coverage. Opus 5.5 completed the design consultation. Its second implementation review was submitted but returned the same usage limit, so no second Opus approval is claimed. Native discovery and model-free tests remain available during this limit. macOS used Claude 2.1.302, Ubuntu 2.1.295, and Windows 2.1.303. Codex acceptance used 0.163.0 on all three hosts.
+
+Run `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-permissions.ts` after building to repeat the native acceptance. Set `AGENT_BRIDGE_LIVE_RUNTIME=claude` or `codex` for a single runtime; this is an explicit test selection, not a model fallback. It consumes native account usage and writes isolated temporary workspaces plus a local evidence.json. Codex automatic-review testing verifies an actual escalated command succeeds without a Bridge permission response, not just a returned configuration value. These Windows cases run over SSH because they use native file patches and an explicitly escalated command; they do not re-claim general Windows sandbox process compatibility under SSH.
+
 ## Limits
 
 - Native acceptance covers the specific Mac, Windows and Linux configurations above, with Opus 5.5 and a Sonnet 5.5 follow-up. It does not establish compatibility with every shell, operating-system version, model or enterprise policy.

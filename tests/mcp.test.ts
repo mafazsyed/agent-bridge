@@ -17,7 +17,7 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
   try {
     await server.connect(b); await client.connect(a);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'get_run', 'list_conversations', 'list_models', 'list_runs', 'start_run', 'wait_run']);
+    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'get_run', 'list_conversations', 'list_models', 'list_permission_modes', 'list_runs', 'start_run', 'wait_run']);
     const start = await client.callTool({ name: 'start_run', arguments: { requestKey: 'mcp-fixture', prompt: 'Review', cwd: root } });
     assert.equal(start.isError, undefined);
     const payload = (start.structuredContent as any).result;
@@ -25,6 +25,13 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
     assert.equal((read.structuredContent as any).result.run.status, 'queued');
     const invalid = await client.callTool({ name: 'start_run', arguments: { requestKey: 'oops', prompt: '' } });
     assert.equal(invalid.isError, true);
+    const native = await client.callTool({ name: 'start_run', arguments: { requestKey: 'native-plan', prompt: 'Plan', cwd: root,
+      permissions: { runtime: 'claude', permissionMode: 'plan' } } });
+    assert.equal(native.isError, undefined);
+    assert.deepEqual((native.structuredContent as any).result.run.permissions, { runtime: 'claude', permissionMode: 'plan' });
+    const mixed = await client.callTool({ name: 'start_run', arguments: { requestKey: 'mixed', prompt: 'Plan', cwd: root,
+      permissions: { runtime: 'claude', permissionMode: 'default', sandbox: 'danger-full-access' } } });
+    assert.equal(mixed.isError, true);
     bridge.store.attachWorker(payload.run.id, 'fixture', process.pid);
     bridge.store.claimRun(payload.run.id, 'fixture');
     const permission = bridge.store.requestPermission(payload.run.id, 'fixture', 'AskUserQuestion', { questions: [{ question: 'Which colour?' }] }, 'fixture');

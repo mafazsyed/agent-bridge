@@ -17,6 +17,7 @@ export interface ModelCatalogue {
     displayName: string;
     description: string;
     supportsEffort: boolean | null;
+    supportsAutoMode: boolean | null;
     supportedEffortLevels: NonNullable<ModelInfo['supportedEffortLevels']> | null;
   }[];
 }
@@ -52,6 +53,7 @@ export async function discoverModels(settings: Config, { open = query, timeoutMs
       value: m.value, resolvedModel: m.resolvedModel ?? null,
       displayName: m.displayName, description: m.description,
       supportsEffort: m.supportsEffort ?? null,
+      supportsAutoMode: m.supportsAutoMode ?? null,
       supportedEffortLevels: m.supportedEffortLevels ?? null,
     })) };
   } catch (error) {

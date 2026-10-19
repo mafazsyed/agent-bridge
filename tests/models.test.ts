@@ -19,7 +19,7 @@ test('model discovery preserves runtime aliases and unknown capabilities without
   } });
   assert.equal(result.source, 'claude-code');
   assert.ok(Number.isFinite(Date.parse(result.fetchedAt)));
-  assert.deepEqual(result.models[0], models[0]);
+  assert.deepEqual(result.models[0], { ...models[0], supportsAutoMode: null });
   assert.equal(result.models[1]!.supportsEffort, null);
   assert.equal(result.models[1]!.supportedEffortLevels, null);
   assert.equal(result.models[2]!.supportsEffort, false);

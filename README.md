@@ -47,7 +47,7 @@ Registration and trust are separate. If Codex reports `MCP tool call requires ap
 default_tools_approval_mode = "approve"
 ```
 
-Only enable that setting when you want Codex to call all of this server's tools, including `answer_permission`, under your task instructions. A delegated Bash command still stops at the bridge's one-time approval; this setting lets Codex supply that approval when your authorization covers it. It does not make the worktree a sandbox. The delegation skill explains the workflow. See [Codex MCP configuration](https://developers.openai.com/codex/mcp/) for per-tool alternatives.
+Only enable that setting when you want Codex to call all of this server's tools, including `answer_permission`, under your task instructions. With default permissions a delegated Claude Bash command still stops at the bridge's one-time approval; this setting lets Codex supply that approval when your authorization covers it. It does not make the worktree a sandbox. The delegation skill explains the workflow. See [Codex MCP configuration](https://developers.openai.com/codex/mcp/) for per-tool alternatives.
 
 ## Use
 
@@ -56,6 +56,7 @@ Ask your MCP-enabled agent to delegate a review to Opus. It can use:
 | Tool | Purpose |
 | --- | --- |
 | `list_models` | Read the selected runtime's live model catalogue and effort capabilities |
+| `list_permission_modes` | Discover native permission controls without submitting a prompt |
 | `start_run` | Start a job or queue a follow-up on a conversation |
 | `get_run` | Read status, results, pending input and progress pages |
 | `wait_run` | Wait up to 50 seconds for changes |
@@ -98,13 +99,13 @@ node dist/cli.js doctor codex
 node dist/cli.js models codex
 ```
 
-Copy `skills/codex-delegation` into your Claude skills directory if you want its workflow instructions. Restart the host after registering or upgrading the server. The first upgraded process migrates the ledger to schema 2; older binaries refuse that newer ledger. Keep a backup before downgrading.
+Copy `skills/codex-delegation` into your Claude skills directory if you want its workflow instructions. Restart the host after registering or upgrading the server. The first upgraded process migrates the ledger to schema 3; older binaries refuse that newer ledger. Keep a backup before downgrading.
 
 Ask Claude to call `list_models({"runtime":"codex"})`, then `start_run` with `"runtime":"codex"`, `cwd`, `requestKey` and `prompt`. Omitted model and effort use Codex's configured defaults (or its native catalogue default); the first start saves the actual selection. Explicit choices must exist in Codex's current catalogue. No model ID or effort list is hard-coded. Follow-ups use `conversationId` and cannot switch runtimes. Per-run model/effort overrides do not change the saved conversation selection.
 
 Codex uses the native `app-server` JSON-RPC protocol over private stdio, not a remote server or a copied credential. Model discovery sends no prompt and creates no thread. Jobs use a saved native thread; `nativeId` in the result is the ID for `codex resume <nativeId>`. A missing transcript is an error, never a silent fresh start. Codex does not expose Claude's `maxTurns` budget, so that argument is rejected for Codex; use `timeoutSeconds` instead.
 
-**Codex permissions:** review requests native read-only with network disabled and refuses new escalation requests. Existing native execution rules can authorize commands outside that sandbox in **both review and write mode**. Reads are not confined to the workspace. Write uses the native workspace sandbox with network disabled and temporary-directory write exemptions removed. Sandboxed commands and edits run without per-command approval; native escalation requests stop for a one-time bridge decision. The bridge never grants session-wide approvals or saves execution rules. An approved escalation can affect resources outside the worktree. Codex does not have Claude's bridge file hooks: inspect changes to agent configuration before integrating a worktree; detected changes produce a warning.
+**Default Codex permissions:** review requests native read-only with network disabled and refuses new escalation requests. Existing native execution rules can authorize commands outside that sandbox in **both review and write mode**. Reads are not confined to the workspace. Write uses the native workspace sandbox with network disabled and temporary-directory write exemptions removed. Sandboxed commands and edits run without per-command approval; native escalation requests stop for a one-time bridge decision. The bridge never grants session-wide approvals or saves execution rules. An approved escalation can affect resources outside the worktree. Codex does not have Claude's bridge file hooks: inspect changes to agent configuration before integrating a worktree; detected changes produce a warning.
 
 On Windows, the adapter preserves the native sandbox implementation instead of downgrading it. Run from an interactive Windows logon: our native sandbox runner failed under SSH on the tested host, while the interactive session passed. On Ubuntu systems that restrict unprivileged user namespaces, the official Codex installation may need an administrator-managed AppArmor profile; the bridge does not disable host protections.
 
@@ -114,9 +115,63 @@ The adapter disables inherited MCP servers, apps, plugins, hooks and nested dele
 
 **Claude:** review mode exposes only Read, Glob, Grep and AskUserQuestion. Write mode adds Edit, Write and Bash. A pre-tool hook checks file/search paths, including symlinks; direct edits to Git metadata and agent configuration are denied. Project and user settings, external MCP servers and slash commands are not loaded by the bridge's runtime configuration.
 
-Every Bash command requires a one-time host decision. The pending request contains its exact input. Approval must come from the human's existing authorization or a new human decision, never from Claude's request itself. Do not approve arbitrary commands just to clear a blocked job.
+With omitted/default Bridge permissions, every Claude Bash command requires a one-time host decision. The pending request contains its exact input. Approval must come from the human's existing authorization or a new human decision, never from Claude's request itself. Do not approve arbitrary commands just to clear a blocked job.
 
-**A worktree is not a sandbox.** An approved shell command can access outside it, use the network and run repository scripts. Git checkout can invoke configured filters in the explicitly selected trusted repository. Tool checks are not an OS security boundary against other local processes or filesystem races. No `bypassPermissions` mode is used.
+**A worktree is not a sandbox.** An approved shell command can access outside it, use the network and run repository scripts. Git checkout can invoke configured filters in the explicitly selected trusted repository. Tool checks are not an OS security boundary against other local processes or filesystem races. Explicit native bypass/full-access selections remove ordinary approval or sandbox protections, as described below.
+
+### Native permission selection
+
+`mode` and `permissions` control different things:
+
+| Control | Purpose |
+| --- | --- |
+| `mode: "review"` or `"write"` | Bridge workspace and tool boundary. Write creates an isolated Git worktree; this stays fixed for the conversation. |
+| `permissions` | Runtime-native approval/sandbox selection for a run. Omitted inherits the conversation default; `null` selects the original Bridge-controlled policy. |
+
+Call `list_permission_modes({"runtime":"claude"})` or `node dist/cli.js permissions claude` (use `codex` for Codex). Claude discovery tests its control API with no prompt and no tools. Codex discovery reads its generated protocol schema and administrative requirements. No account settings are changed; neither probe uses an inference turn. Unsupported/new protocol values are identified, not silently translated. Model entries also expose Claude's `supportsAutoMode` (`null` means unknown).
+
+Claude accepts these explicit selections:
+
+| `permissionMode` | Native behavior | Bridge workspaces |
+| --- | --- | --- |
+| `default` | Unresolved actions ask the host; edits are no longer pre-approved | review, write |
+| `acceptEdits` | Automatically accept edits; other actions follow native checks | write |
+| `plan` | Return a plan; Bridge supplies only review tools, so it cannot exit into editing itself | review, write |
+| `dontAsk` | Deny unapproved actions without asking; this can deny edits and questions too | review, write |
+| `auto` | Use Claude's own automatic permission classifier | write |
+| `bypassPermissions` | Skip ordinary native permission checks | write |
+
+The CLI may label `default` as **manual**; the SDK reports `default`. Explicit modes keep Bridge's tool ceiling, file/path checks, protected metadata, no background Bash and cancellation guards. Ordinary actions are deferred to Claude, without hook-based auto-approval or extra pre-approved edit rules. `auto` is subject to account/model/organization restrictions. The runtime must confirm the selected mode **before the prompt is sent**; it is checked again on initialization and tool calls. Incompatible older CLIs and silent downgrades are refused. A mode change after dispatch stops the turn with an uncertain outcome.
+
+```json
+{
+  "requestKey": "implement-with-native-edits-1",
+  "cwd": "/path/to/project",
+  "mode": "write",
+  "baseRef": "HEAD",
+  "prompt": "Implement the agreed change and test it.",
+  "permissions": { "runtime": "claude", "permissionMode": "acceptEdits" }
+}
+```
+
+Codex requires three separate native fields:
+
+```json
+{
+  "runtime": "codex",
+  "sandbox": "workspace-write",
+  "approvalPolicy": "on-request",
+  "approvalsReviewer": "user"
+}
+```
+
+Pass that object as `permissions`. Sandboxes are `read-only`, `workspace-write` and `danger-full-access`. Approval policies are the installed protocol's supported `untrusted`, `on-request`, `never`, or a `granular` object with all five booleans: `sandbox_approval`, `rules`, `skill_approval`, `request_permissions`, `mcp_elicitations`. A reviewer is `user` (forward native requests to the host) or `auto_review` (Codex's own automatic review). The deprecated `guardian_subagent` alias and arbitrary named permission profiles are not exposed as Bridge selections. Availability is checked against the applied native response before every prompt, including resumes. `untrusted` is retained only where the native runtime supports it; current documentation may recommend newer policies.
+
+`never` means no approval prompts, **not** full access. Sandboxed selections keep network disabled and workspace-write excludes temporary roots. `danger-full-access` removes that sandbox, including its network boundary. Codex review workspaces accept only `read-only` / `never` / `user`; other combinations require a write worktree. Inherited native execution rules remain relevant, and external tools remain disabled. Flags for disabled tools in a granular policy do not enable those tools.
+
+A new conversation saves its initial selection. Follow-ups can override `permissions` **for that run only**, just like model and effort; later omitted values return to the conversation default. This supports planning then editing in the same native session. Requests save their selection at submission, so queued jobs cannot change each other's settings. The run's `started` event reports the applied controls. Explicit `null` returns one run to the original Bridge policy.
+
+Broad access is opt-in through the explicit selection. Host agents must have the human's authorization for that access; a worker or repository cannot grant it. There is no second confirmation checkbox. A worktree does not confine shell commands, and Claude bypass or Codex full access can affect resources outside it. User/organization restrictions can still refuse a selection. Permission discovery is not a guarantee of account quota or every model's capabilities.
 
 ## Lifetimes and recovery
 

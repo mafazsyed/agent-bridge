@@ -3,8 +3,10 @@ import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { BridgeError, NATIVE_DEFAULT, QUESTION_TOOLS, TERMINAL, type Conversation, type Effort, type Event, type Permission, type Run, type RunStatus } from './types.js';
+import { runtimePermissionsSchema, type RuntimePermissions } from './permission-options.js';
 
 export interface CreateRunInput {
+  permissions?: RuntimePermissions | null;
   conversation: Conversation;
   requestKey: string;
   fingerprint: string;
@@ -21,7 +23,7 @@ type Param = string | number | null;
 
 const ACTIVE = `status IN ('queued', 'running', 'needs_input')`;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const RUNTIME_COLUMN = `runtime TEXT NOT NULL DEFAULT 'claude' CHECK (runtime IN ('claude', 'codex'))`;
 
 // Private columns: ord gives deterministic insertion order, ack_unknown_through is the highest unknown
@@ -95,6 +97,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS permissions_one_pending ON permissions(run_id)
 `;
 
 const toConversation = (r: Row): Conversation => ({
+  permissions: r.permissions_json == null ? null : runtimePermissionsSchema.parse(JSON.parse(r.permissions_json as string)),
   id: r.id as string,
   runtime: r.runtime as Conversation['runtime'],
   nativeId: r.native_id as string | null,
@@ -110,6 +113,7 @@ const toConversation = (r: Row): Conversation => ({
 });
 
 const toRun = (r: Row): Run => ({
+  permissions: r.permissions_json == null ? null : runtimePermissionsSchema.parse(JSON.parse(r.permissions_json as string)),
   id: r.id as string,
   conversationId: r.conversation_id as string,
   requestKey: r.request_key as string,
@@ -178,9 +182,11 @@ export class Store {
     this.tx(() => {
       const columns = this.all('PRAGMA table_info(runs)');
       if (!columns.some(c => c.name === 'worker_identity')) this.db.exec('ALTER TABLE runs ADD COLUMN worker_identity TEXT');
+      if (!columns.some(c => c.name === 'permissions_json')) this.db.exec('ALTER TABLE runs ADD COLUMN permissions_json TEXT');
       const conversationColumns = this.all('PRAGMA table_info(conversations)');
       if (!conversationColumns.some(c => c.name === 'runtime')) this.db.exec(`ALTER TABLE conversations ADD COLUMN ${RUNTIME_COLUMN}`);
       if (!conversationColumns.some(c => c.name === 'native_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN native_id TEXT');
+      if (!conversationColumns.some(c => c.name === 'permissions_json')) this.db.exec('ALTER TABLE conversations ADD COLUMN permissions_json TEXT');
       this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS conversations_native ON conversations(runtime, native_id)');
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     });
@@ -228,18 +234,18 @@ export class Store {
         }
       } else {
         this.run(
-          `INSERT INTO conversations (id, runtime, native_id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          c.id, c.runtime, c.nativeId, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt,
+          `INSERT INTO conversations (id, runtime, native_id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at, permissions_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          c.id, c.runtime, c.nativeId, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt, c.permissions ? JSON.stringify(c.permissions) : null,
         );
       }
       const id = randomUUID();
       this.run(
         `INSERT INTO runs (id, conversation_id, request_key, fingerprint, prompt, model, effort, status, timeout_ms, max_turns,
-           created_at, updated_at, ack_unknown_through)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+           created_at, updated_at, ack_unknown_through, permissions_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
         id, c.id, input.requestKey, input.fingerprint, input.prompt, input.model, input.effort, input.timeoutMs, input.maxTurns,
-        now, now, ackThrough,
+        now, now, ackThrough, input.permissions ? JSON.stringify(input.permissions) : null,
       );
       return { run: this.getRun(id), conversation: this.getConversation(c.id), created: true };
     });

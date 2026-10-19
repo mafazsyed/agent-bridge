@@ -1,3 +1,4 @@
+import type { RuntimePermissions } from './permission-options.js';
 export type Mode = 'review' | 'write';
 export type Runtime = 'claude' | 'codex';
 export const RUNTIMES = ['claude', 'codex'] as const satisfies readonly Runtime[];
@@ -13,6 +14,8 @@ export const QUESTION_TOOLS: readonly string[] = ['AskUserQuestion', 'codex.user
 export type RunStatus = 'queued' | 'running' | 'needs_input' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export const TERMINAL: readonly RunStatus[] = ['succeeded', 'failed', 'cancelled', 'unknown'];
 export interface Conversation {
+  // Null/omitted preserves the original controlled-delegation behavior.
+  permissions?: RuntimePermissions | null;
   id: string;
   runtime: Runtime;
   // Native session/thread identifier when it differs from id (Codex); null until bound, and for Claude.
@@ -28,6 +31,8 @@ export interface Conversation {
   createdAt: number;
 }
 export interface Run {
+  // Resolved at submission, independent of subsequent queued follow-ups.
+  permissions?: RuntimePermissions | null;
   id: string;
   conversationId: string;
   requestKey: string;
@@ -63,6 +68,7 @@ export interface Permission {
   answers: Record<string, string> | null;
 }
 export interface StartInput {
+  permissions?: RuntimePermissions | null;
   requestKey: string;
   prompt: string;
   conversationId?: string;

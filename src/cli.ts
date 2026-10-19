@@ -6,6 +6,7 @@ import { serve } from './mcp.js';
 import { discoverModels } from './models.js';
 import { discoverCodexModels } from './codex-models.js';
 import { BridgeError } from './types.js';
+import { createPermissionDiscovery } from './permission-discovery.js';
 
 async function input(): Promise<string> {
   let text = '';
@@ -18,10 +19,15 @@ async function input(): Promise<string> {
 async function main() {
   const [command, arg, extra, cursor] = process.argv.slice(2);
   if (!command || command === '--help') {
-    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models [claude|codex]    List native models and effort capabilities\n  start                   Read start_run JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor [claude|codex]    Check the native CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code or Codex. See README for permissions and recovery.');
+    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models [claude|codex]    List native models and effort capabilities\n  permissions [claude|codex]  Discover native permission controls\n  start                   Read start_run JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor [claude|codex]    Check the native CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code or Codex. See README for permissions and recovery.');
     return;
   }
   const settings = config(false);
+  if (command === 'permissions') {
+    if (arg && !['claude', 'codex'].includes(arg)) throw new BridgeError('invalid_runtime', 'Runtime must be claude or codex.');
+    console.log(JSON.stringify(await createPermissionDiscovery(settings)(arg === 'codex' ? 'codex' : 'claude'), null, 2));
+    return;
+  }
   if (command === 'models') {
     if (arg && !['claude', 'codex'].includes(arg)) throw new BridgeError('invalid_runtime', 'Runtime must be claude or codex.');
     console.log(JSON.stringify(await (arg === 'codex' ? discoverCodexModels(settings) : discoverModels(settings)), null, 2));

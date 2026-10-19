@@ -96,3 +96,36 @@ test('Codex abort during startup closes pending RPCs without an uncertain dispat
     assert.equal(f.events().some(e => e.method === 'turn/start'), false);
   } finally { await pending.catch(() => {}); f.clean(); }
 });
+
+for (const permissions of [
+  { runtime: 'codex', sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' },
+  { runtime: 'codex', sandbox: 'danger-full-access', approvalPolicy: 'never', approvalsReviewer: 'user' },
+  { runtime: 'codex', sandbox: 'read-only', approvalPolicy: 'untrusted', approvalsReviewer: 'user' },
+  { runtime: 'codex', sandbox: 'workspace-write', approvalPolicy: { granular: { sandbox_approval: true, rules: false, skill_approval: false, request_permissions: false, mcp_elicitations: false } }, approvalsReviewer: 'user' },
+] as const) test(`Codex forwards and verifies explicit native permissions: ${JSON.stringify(permissions)}`, async () => {
+  const f = setup('early-complete', 'write');
+  try {
+    await runCodex(f.settings, f.bridge.store, { ...f.run, permissions }, f.conversation, 'fixture', f.abort, f.open);
+    for (const method of ['thread/start', 'turn/start']) {
+      const params = f.events().find(e => e.method === method).params;
+      assert.deepEqual(params.approvalPolicy, permissions.approvalPolicy); assert.equal(params.approvalsReviewer, permissions.approvalsReviewer);
+    }
+    const applied = f.bridge.store.events(f.run.id).find(e => e.type === 'started')!.data as any;
+    assert.deepEqual(applied.permissionsRequested, permissions);
+  } finally { f.clean(); }
+});
+for (const scenario of ['reviewer-downgrade', 'policy-downgrade']) test(`Codex refuses changed permissions before dispatch: ${scenario}`, async () => {
+  const f = setup(scenario, 'write');
+  try {
+    await assert.rejects(runCodex(f.settings, f.bridge.store, { ...f.run, permissions: { runtime: 'codex', sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' } }, f.conversation, 'fixture', f.abort, f.open), { code: 'sandbox_unavailable' });
+    assert.equal(f.events().some(e => e.method === 'turn/start'), false);
+  } finally { f.clean(); }
+});
+test('Codex never policy does not forward an unexpected native escalation', async () => {
+  const f = setup('approval', 'write');
+  try {
+    await runCodex(f.settings, f.bridge.store, { ...f.run, permissions: { runtime: 'codex', sandbox: 'workspace-write', approvalPolicy: 'never', approvalsReviewer: 'user' } }, f.conversation, 'fixture', f.abort, f.open);
+    assert.deepEqual(f.events().find(e => e.decision).decision, { decision: 'decline' });
+    assert.equal(f.bridge.store.events(f.run.id).some(e => e.type === 'needs_input'), false);
+  } finally { f.clean(); }
+});

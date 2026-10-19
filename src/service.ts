@@ -10,6 +10,7 @@ import { BridgeError, CLAUDE_EFFORTS, NATIVE_DEFAULT, RUNTIMES, TERMINAL, isClau
 import type { Config } from './config.js';
 import { resolveBase } from './git.js';
 import { workerAlive } from './process-identity.js';
+import { runtimePermissionsSchema, validatePermissions } from './permission-options.js';
 
 // The parsed input is the idempotency fingerprint: keep existing keys in order, append new optional keys
 // without defaults, so requests that omit them hash exactly as before.
@@ -20,6 +21,7 @@ export const startSchema = z.object({
   effort: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/).optional(), baseRef: z.string().min(1).max(200).optional(),
   timeoutSeconds: z.number().int().min(10).max(7200).optional(), maxTurns: z.number().int().min(1).max(100).optional(),
   acknowledgeUncertain: z.boolean().optional(), runtime: z.enum(RUNTIMES).optional(),
+  permissions: runtimePermissionsSchema.nullable().optional(),
 }).strict();
 const DEFAULT_MAX_TURNS = 30;
 const executableFor = (settings: Config, runtime: Runtime) => runtime === 'codex' ? settings.codexExecutable : settings.executable;
@@ -68,6 +70,8 @@ export class Bridge {
       throw new BridgeError('immutable_conversation', `A follow-up continues its saved ${saved.runtime} conversation. Omit runtime or start a new conversation.`);
     }
     const runtime = saved?.runtime ?? input.runtime ?? 'claude';
+    const permissions = input.permissions === undefined ? saved?.permissions ?? null : input.permissions;
+    validatePermissions(permissions, runtime, saved?.mode ?? input.mode ?? 'review');
     if (!executableFor(this.settings, runtime)) {
       throw new BridgeError('cli_missing', runtime === 'codex'
         ? 'Install Codex and run codex login (or set AGENT_BRIDGE_CODEX_PATH) before starting a new Codex run. Saved work remains available.'
@@ -97,7 +101,7 @@ export class Bridge {
       const base = mode === 'write' ? resolveBase(source, input.baseRef!) : null;
       const defaults = runtime === 'codex' ? { model: NATIVE_DEFAULT, effort: NATIVE_DEFAULT } : { model: 'claude-opus-5-5', effort: 'high' };
       conversation = {
-        id, runtime, nativeId: null, cwd: mode === 'write' ? join(realpathSync.native(this.settings.stateDir), 'worktrees', id) : source,
+        id, runtime, permissions, nativeId: null, cwd: mode === 'write' ? join(realpathSync.native(this.settings.stateDir), 'worktrees', id) : source,
         sourceCwd: base?.repo ?? source, mode, model: input.model ?? defaults.model, effort: input.effort ?? defaults.effort,
         baseCommit: base?.commit ?? null, branch: mode === 'write' ? `agent-bridge/${id}` : null,
         sessionInitialized: false, createdAt: Date.now(),
@@ -107,6 +111,7 @@ export class Bridge {
     const created = this.store.createRun({
       conversation, requestKey: input.requestKey, fingerprint, prompt: input.prompt,
       model: input.model ?? conversation.model, effort: input.effort ?? conversation.effort,
+      permissions,
       timeoutMs: (input.timeoutSeconds ?? 1800) * 1000, maxTurns: input.maxTurns ?? DEFAULT_MAX_TURNS,
       acknowledgeUncertain: input.acknowledgeUncertain,
     });
