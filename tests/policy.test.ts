@@ -41,3 +41,17 @@ test('write mode gates commands, protects metadata and checks physical paths', (
     assert.equal(evaluateTool(root, 'review', 'Read', { file_path: 'escape/new-file' }).kind, 'deny');
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
+
+test('a trailing-space workspace stays distinct from its trimmed sibling', { skip: process.platform === 'win32' }, () => {
+  const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'bridge-spaces-')));
+  const root = join(base, 'workspace '), sibling = join(base, 'workspace');
+  try {
+    mkdirSync(root); mkdirSync(sibling);
+    writeFileSync(join(root, 'fixture.txt'), 'assigned');
+    writeFileSync(join(sibling, 'fixture.txt'), 'outside');
+    assert.equal(evaluateTool(root, 'review', 'Read', { file_path: 'fixture.txt' }).kind, 'allow');
+    assert.equal(evaluateTool(root, 'review', 'Read', { file_path: join(root, 'fixture.txt') }).kind, 'allow');
+    assert.equal(evaluateTool(root, 'review', 'Read', { file_path: join(sibling, 'fixture.txt') }).kind, 'deny');
+    assert.equal(evaluateTool(root, 'write', 'Write', { file_path: join(sibling, 'fixture.txt') }).kind, 'deny');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});

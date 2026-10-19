@@ -1,6 +1,6 @@
 # Validation record
 
-Private preview, 19 October 2026. No model credentials are included in this repository.
+Cross-platform preview, 19 October 2026. No model credentials are included in this repository.
 
 ## Native runtime checks on macOS
 
@@ -15,6 +15,24 @@ Node 26.5.0, installed Claude Code 2.1.302, Claude Agent SDK 0.3.303. Requested 
 - Opus reviewed the implementation through the bridge itself. Its review was read-only; test execution was performed separately by the implementing agent.
 
 One native Claude absolute-path read on this external volume was rejected by its own suspicious-path check. Claude retried a relative path successfully. The bridge did not override the native runtime's refusal.
+
+## Native Windows and Linux acceptance
+
+Real authenticated Claude calls passed on both remote machines over SSH. These used native Claude executables, not the deterministic CI inference fixture.
+
+| Host | Node | Claude Code | Result |
+| --- | --- | --- | --- |
+| Linux x64 | 24.22.0 | 2.1.295 | Passed |
+| Windows 11 x64 | 24.22.0 | 2.1.303 | Passed |
+
+Both hosts passed SDK → native CLI → SDK continuation, review without writes, queued follow-up context, isolated worktree writes, exact command approval, questions, cancellation, refusal of late answers and resuming the cancelled conversation. A real stdio MCP client then continued the existing Opus conversation using `sonnet` with medium effort, disconnected and reconnected, and retrieved its successful result. The runtime reported `claude-sonnet-5-5`; it retained the random marker without rereading files. This extends native MCP coverage; the full Codex host acceptance described below was performed on Mac.
+
+Two issues were corrected during acceptance:
+
+- Windows' original Claude Code 2.1.195 authenticated but the model endpoint refused Opus 5.5 because it requires 2.1.280 or newer. Updating the installed CLI resolved it. The requirement is now documented.
+- Claude dropped a trailing space from a Linux fixture's workspace path. The bridge correctly denied that sibling path. The runtime instructions now provide the exact JSON-encoded workspace and recommend relative file paths; the same live test then passed. A regression test verifies that a trailing-space workspace remains distinct from its trimmed sibling. The live fixture uses embedded spaces on Windows, where trailing-space directory names are not supported normally.
+
+Independent ledger and file checks confirmed successful outcomes, one consumed approval for exactly `git diff --stat`, preserved conversation identities, expected cancellation states, an unchanged source checkout, and edits only in the assigned worktree. The updated runtime also passed the Mac live review/write suite again. Node 24 was installed only inside the remote acceptance directories, leaving their default Node installations unchanged.
 
 ## Codex integration
 
@@ -33,13 +51,13 @@ The initial write-capable MCP call was blocked by Codex's existing `never` appro
 
 Process tests exercise the real compiled CLI, SDK transport, workers, SQLite and stdio MCP. Only the model process is a deterministic protocol fixture. They do not prove native Claude compatibility on other operating systems. The first GitHub CI run passed this suite on Node 24 on macOS, Windows and Linux: [run 39307054507](https://github.com/mafazsyed/agent-bridge/actions/runs/39307054507). This used the same application source as the private-preview commit; later CI setup changes do not add native-model coverage.
 
-The final local suite passed 28 tests. Opus re-reviewed the corrections and found no remaining blocker for the macOS private preview. Its review is not a substitute for native acceptance on other platforms.
+The initial local suite passed 28 tests. Opus re-reviewed those corrections and found no remaining blocker for the macOS private preview. After native cross-platform acceptance and the workspace-path correction, the updated suite passed 29 tests on Mac and Linux; Windows passed 28 with the POSIX trailing-space case skipped. Typechecks and builds passed on all three hosts. The later path-instruction change was verified by tests and live acceptance, not a new Opus review.
 
 Local POSIX privacy modes are tested; Windows uses the user's filesystem ACLs. Tests use spaces in workspace paths everywhere and trailing spaces only where the filesystem supports them.
 
 ## Limits
 
-- Native Claude acceptance has been performed on macOS only. Windows/Linux native authentication, shell permissions and model calls still need hands-on acceptance before a stable cross-platform release.
+- Native acceptance covers the specific Mac, Windows and Linux configurations above, with Opus 5.5 and a Sonnet 5.5 follow-up. It does not establish compatibility with every shell, operating-system version, model or enterprise policy.
 - Sleep handling has a stale-clock/process-identity regression test; no physical laptop sleep test was performed.
 - Local job persistence survives client exit, not arbitrary OS termination. No automatic wake-up of an idle host and no exactly-once execution guarantee.
 - Worktrees and tool restrictions are not an OS sandbox. Approved commands and trusted repository checkout filters can have broader effects.

@@ -2,11 +2,13 @@
 
 Persistent local Claude delegation for Codex and other MCP clients. Start a review or an isolated implementation task, keep working, then inspect progress and continue the same Claude conversation.
 
-Private preview.
+Public preview.
 
 ## Setup
 
 Requirements: **Node 24+**, Git for implementation tasks, and an installed Claude Code executable. Authenticate using Claude's own supported login or API configuration. Agent Bridge does not collect credentials or provide a separate sign-in service.
+
+Use a current Claude Code version. The default Opus 5.5 model requires Claude Code 2.1.280 or newer; an older executable can authenticate successfully but still be refused when it calls that model. Run `claude update` if the runtime reports that it is too old.
 
 On Windows, install the native `claude.exe`; npm `.cmd` wrappers are not executed through a shell. Saved jobs can be inspected and cancelled even if Claude has been removed. Starting new jobs requires the executable.
 
@@ -69,7 +71,9 @@ Example `start_run` input:
 }
 ```
 
-The default is review mode, Opus 5.5 and high effort. The account must have access to the requested model. Overrides are explicit; there is no silent model fallback. Each new turn gets a new request key. Repeating the exact input with the same key returns the original job rather than dispatching it again. Follow-ups pass `conversationId` instead of `cwd`; their model and effort can be overridden per turn.
+The default is review mode, Opus 5.5 and high effort. The account must have access to the requested model. The bridge does not configure automatic fallback; Claude Code resolves aliases and applies its own account policies. The runtime's reported model is recorded in the run's `started` event. Each new turn gets a new request key. Repeating the exact input with the same key returns the original job rather than dispatching it again. Follow-ups pass `conversationId` instead of `cwd`; their model and effort can be overridden per turn.
+
+Opus is not required: `model` also accepts Claude Code aliases such as `sonnet`, `haiku` or `fable`, or an explicit model ID supported by your runtime and account. For example, ask Codex to delegate using Sonnet with medium effort. A follow-up can change models while retaining the same conversation; the override applies to that turn. Agent Bridge does not currently expose a model-list tool or an interactive picker. Claude Code's own `/model` command and the Agent SDK's `supportedModels()` catalogue are separate from the bridge's tools. See [Claude model configuration](https://code.claude.com/docs/en/model-config) for model availability and effort support.
 
 For implementation, add `"mode": "write", "baseRef": "HEAD"` to a **new** conversation. The bridge creates a branch and worktree from that commit. It leaves the original checkout, including uncommitted changes, alone. The result includes the worktree path. Review and integrate that diff deliberately; the bridge does not automatically commit, merge or push.
 
@@ -124,7 +128,7 @@ AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-control.ts
 
 The runtime prototype verifies SDK → CLI → SDK continuation with the same UUID and retained context. The live acceptance script checks review restrictions, queued follow-ups, isolated edits and a specific harmless command approval. Temporary evidence is kept under ignored `.local/`.
 
-See [validation](docs/validation.md) for the tested versions and coverage limits. The official Agent SDK is pinned; native Claude updates require re-running the compatibility probe. Public package publication and plugin-directory submission are separate from this private repository.
+See [validation](docs/validation.md) for the tested versions and coverage limits. The official Agent SDK is pinned; native Claude updates require re-running the compatibility probe. This is a source repository: npm package publication and plugin-directory submission are separate steps.
 
 ## References
 
