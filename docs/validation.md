@@ -16,6 +16,17 @@ Node 26.5.0, installed Claude Code 2.1.302, Claude Agent SDK 0.3.303. Requested 
 
 One native Claude absolute-path read on this external volume was rejected by its own suspicious-path check. Claude retried a relative path successfully. The bridge did not override the native runtime's refusal.
 
+## Codex integration
+
+Installed the stdio MCP server and delegation skill in Codex's shared configuration. A fresh Codex CLI 0.163.0 session loaded both and called the installed server; this was not a direct bridge script standing in for Codex.
+
+- Read-only inspection listed existing conversations and runs and retrieved a completed Opus result.
+- Codex started a real Opus 5.5 review, answered its AskUserQuestion, and continued the same conversation. The follow-up recalled a random marker and the chosen answer without rereading files or using tools.
+- Codex started a separate write conversation. Opus created the exact requested file in its worktree, stopped for an exact `git diff --stat` approval, then completed after Codex supplied the authorized one-time decision.
+- Independent checks of MCP call records, the persisted runs and permissions, and Git/file state confirmed all three runs succeeded, the answer and command decisions were consumed once, and the source checkout was unchanged.
+
+The initial write-capable MCP call was blocked by Codex's existing `never` approval policy. After explicit user authorization, automatic tool approval was enabled for Agent Bridge alone. The global approval policy and every other Codex setting were preserved. This host trust does not remove the bridge's per-command decision or imply that unrequested commands are authorized.
+
 ## Automated checks
 
 `npm run check` runs TypeScript checks, serialized tests, then a build. The tests cover SQLite transactions across processes, idempotency, queued turns, global concurrency, uncertain outcomes, cancellation, permission expiry/one-time answers, path restrictions, case variants, symlinks, incomplete worktree setup, lost launches, process identity after stale heartbeats, MCP handlers and detached workers surviving their client.
