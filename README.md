@@ -31,6 +31,18 @@ Configure a local stdio MCP server in your client:
 
 For Codex CLI, the equivalent is `codex mcp add agent-bridge -- node /absolute/path/to/agent-bridge/dist/cli.js mcp`. Paths containing spaces must be quoted in your shell. The repository also includes a portable `plugin.json`, `mcp.json` and a `skills/claude-delegation` skill. Build the checkout before registering it as a local plugin; Git alone does not supply `dist` or dependencies. No lifecycle hooks or automatic configuration edits are required.
 
+### Codex tool approval
+
+Registration and trust are separate. If Codex reports `MCP tool call requires approval, but approval policy is never`, the server connected, but that profile cannot approve the call. Choose interactive approval, or explicitly trust this server in Codex's configuration:
+
+```toml
+[mcp_servers.agent-bridge]
+# Keep the existing command, args and env configuration.
+default_tools_approval_mode = "approve"
+```
+
+Only enable that setting when you want Codex to call all of this server's tools, including `answer_permission`, under your task instructions. A delegated Bash command still stops at the bridge's one-time approval; this setting lets Codex supply that approval when your authorization covers it. It does not make the worktree a sandbox. The delegation skill explains the workflow. See [Codex MCP configuration](https://developers.openai.com/codex/mcp/) for per-tool alternatives.
+
 ## Use
 
 Ask your MCP-enabled agent to delegate a review to Opus. It can use:
