@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+// Protocol fixture only. It never invokes a model, reads credentials or executes tools.
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+const args = process.argv.slice(2);
+const value = flag => args.find(arg => arg.startsWith(flag + '='))?.slice(flag.length + 1) ?? (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
+const session = value('--resume') || value('--session-id') || randomUUID();
+const model = value('--model');
+const send = event => process.stdout.write(JSON.stringify(event) + '\n');
+const input = createInterface({ input: process.stdin });
+if (process.env.AGENT_BRIDGE_FIXTURE_LOG) appendFileSync(process.env.AGENT_BRIDGE_FIXTURE_LOG, JSON.stringify({ pid: process.pid, session, args: args.filter((_, i) => args[i - 1] !== '--append-system-prompt') }) + '\n');
+input.on('line', line => {
+  const event = JSON.parse(line);
+  if (event.type === 'control_request') {
+    if (process.env.AGENT_BRIDGE_FIXTURE_TRACE) appendFileSync(process.env.AGENT_BRIDGE_FIXTURE_TRACE, JSON.stringify(event) + '\n');
+    send({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: { commands: [], models: [], agents: [], account: {} } } });
+  }
+  if (event.type !== 'user') return;
+  const text = typeof event.message.content === 'string' ? event.message.content : JSON.stringify(event.message.content);
+  send({ type: 'system', subtype: 'init', session_id: session, model, tools: [], mcp_servers: [], permissionMode: 'default', claude_code_version: '2.1.302', uuid: randomUUID() });
+  if (text.includes('fixture:crash')) { setTimeout(() => process.exit(2), 100); return; }
+  const done = () => {
+    send({ type: 'result', subtype: 'success', session_id: text.includes('fixture:identity') ? randomUUID() : session, is_error: false, result: text.includes('fixture:delay') ? 'delayed fixture done' : 'fixture done', duration_ms: 100, duration_api_ms: 0, num_turns: 1, total_cost_usd: 0, modelUsage: {}, usage: {}, permission_denials: [], uuid: randomUUID() });
+    setTimeout(() => process.exit(0), 30);
+  };
+  setTimeout(done, text.includes('fixture:hang') ? 120_000 : text.includes('fixture:delay') ? 1500 : 10);
+});

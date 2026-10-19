@@ -1,0 +1,11 @@
+Agent Bridge is an independent project, not affiliated with Anthropic or OpenAI.
+
+Design references (no implementation code copied):
+- openclaw/acpx — persistent sessions, queue ownership and lifecycle semantics (MIT)
+  https://github.com/openclaw/acpx
+- Chao-Shiun/claude-consult-mcp — review-oriented MCP workflows (MIT)
+  https://github.com/Chao-Shiun/claude-consult-mcp
+
+Runtime dependencies retain their own licenses and terms. In particular, the
+Claude Agent SDK and installed Claude Code runtime are governed by Anthropic's
+terms; this repository's MIT license does not relicense those dependencies.

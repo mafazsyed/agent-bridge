@@ -1,0 +1,86 @@
+import { setTimeout as delay } from 'node:timers/promises';
+import { config } from './config.js';
+import { Store } from './store.js';
+import { BridgeError, TERMINAL } from './types.js';
+import { runClaude, errorCode, resultErrorCode } from './runtime.js';
+import { prepareWorktree } from './git.js';
+import { processIdentity, workerAlive } from './process-identity.js';
+import { appendFileSync, chmodSync } from 'node:fs';
+import { join } from 'node:path';
+
+async function main() {
+  const [, , stateDir, runId, token] = process.argv;
+  if (!stateDir || !runId || !token) throw new Error('Worker requires state directory, run ID and owner token');
+  const store = new Store(stateDir);
+  const abort = new AbortController();
+  let reason: 'cancelled' | 'timeout' | 'lease_lost' | null = null;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let attached = false;
+  let abortAt: number | null = null;
+  const stop = () => { reason = 'cancelled'; abort.abort(); };
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+  try {
+    let identity = processIdentity(process.pid);
+    for (let attempt = 0; !identity && attempt < 2; attempt++) { await delay(250); identity = processIdentity(process.pid); }
+    if (!identity) throw new BridgeError('worker_identity_unavailable', 'Cannot establish a reliable process identity. No model turn started; retry when the machine is responsive.');
+    attached = store.attachWorker(runId, token, process.pid, identity);
+    if (!attached) return;
+    const settings = { ...config(), stateDir };
+    while (!store.claimRun(runId, token, settings.maxActive)) {
+      const current = store.getRun(runId);
+      if (TERMINAL.includes(current.status)) return;
+      if (current.cancelRequested || abort.signal.aborted) { store.finishRun(runId, token, 'cancelled', null, 'cancelled'); return; }
+      if (!store.heartbeat(runId, token)) return;
+      store.reconcile(Date.now() - settings.staleMs, workerAlive);
+      if (Date.now() - current.createdAt > 24 * 60 * 60 * 1000) { store.finishRun(runId, token, 'failed', null, 'queue_timeout'); return; }
+      await delay(250);
+    }
+    const run = store.getRun(runId);
+    const conversation = store.getConversation(run.conversationId);
+    prepareWorktree(conversation);
+    timer = setInterval(() => {
+      try {
+        if (reason) {
+          abortAt ??= Date.now();
+          abort.abort();
+          if (Date.now() - abortAt >= 60_000) {
+            store.finishRun(runId, token, 'unknown', 'Runtime did not settle within 60 seconds of abort. Inspect the session and any command side effects before continuing.', 'abort_timeout');
+            process.exit(1);
+          }
+          return; // Never keep renewing a lease after abort.
+        }
+        if (!store.heartbeat(runId, token)) reason = 'lease_lost';
+        else if (store.getRun(runId).cancelRequested) reason = 'cancelled';
+        else if (Date.now() - run.startedAt! > run.timeoutMs) reason = 'timeout';
+        if (reason) abort.abort();
+      } catch { reason = 'lease_lost'; abort.abort(); }
+    }, 300);
+    const result = await runClaude(settings, store, run, conversation, token, abort);
+    const text = ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000);
+    // An explicit success is authoritative, even if cancellation raced its delivery.
+    if (!result.is_error) store.finishRun(runId, token, 'succeeded', text, null);
+    else if (reason) store.finishRun(runId, token, reason === 'cancelled' ? 'cancelled' : 'unknown', text, reason);
+    else store.finishRun(runId, token, 'failed', text, resultErrorCode(result));
+  } catch (error) {
+    const code = error instanceof BridgeError ? error.code : errorCode(String(error));
+    const status = reason === 'cancelled' ? 'cancelled' : reason || ['unknown_outcome', 'session_identity_changed'].includes(code) ? 'unknown' : 'failed';
+    store.finishRun(runId, attached ? token : null, status, String(error).slice(0, 8000), reason ?? code);
+  } finally {
+    if (timer) clearInterval(timer);
+    process.off('SIGTERM', stop); process.off('SIGINT', stop);
+    store.close();
+  }
+}
+main().catch(error => {
+  // Startup failures may precede a usable ledger. Keep diagnostics private, never on MCP stdout.
+  const stateDir = process.argv[2];
+  if (stateDir) {
+    try {
+      const file = join(stateDir, 'worker-errors.log');
+      appendFileSync(file, `${new Date().toISOString()} ${process.argv[3]} ${String(error).slice(0, 2000)}\n`, { mode: 0o600 });
+      chmodSync(file, 0o600);
+    } catch { /* A subsequent reconcile marks the unstarted run failed. */ }
+  }
+  process.exitCode = 1;
+});
