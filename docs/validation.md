@@ -55,6 +55,18 @@ The initial local suite passed 28 tests. Opus re-reviewed those corrections and 
 
 Local POSIX privacy modes are tested; Windows uses the user's filesystem ACLs. Tests use spaces in workspace paths everywhere and trailing spaces only where the filesystem supports them.
 
+## Model discovery acceptance
+
+The `list_models` MCP tool and `models` CLI command were exercised against the installed native Claude runtime on all three hosts above. Each returned Claude's own 13-entry catalogue, including aliases, resolved model IDs and effort capabilities. Older entries without capability fields remained unknown. These are runtime picker results, not proof of entitlement to every model.
+
+A fresh Codex CLI session called the installed MCP tool, selected Sonnet with a reported effort level and correctly identified missing effort metadata. Discovery also succeeded while another bridge inference job occupied the single active-run slot. Separate native MCP checks confirmed discovery created no runs or conversations. The installed delegation skill was updated and validated.
+
+The expanded suite passes 37 tests on Mac and Linux, and 36 on Windows with the POSIX-only path test skipped; typechecks and builds pass. New cases cover exact metadata preservation, unknown versus unsupported capabilities, rejection of tool execution, account-field filtering, zero inference input frames, concurrent probe coalescing, refresh after errors, terminating an actual SDK child on discovery timeout, and preserving probe outcomes when cleanup fails. Requested versus reported applied effort is checked with a protocol fixture; absent applied-effort metadata is explicitly marked unreported.
+
+Windows acceptance found that synchronous temporary-directory cleanup blocked the event loop while the SDK child still held its working directory. Cleanup now retries asynchronously so process shutdown can complete. Both the timeout regression and live native discovery passed after the fix. Native inference/continuation evidence in the preceding sections is unchanged; this addition does not claim to have re-tested every model in the catalogue.
+
+Opus 5.5 reviewed the design and then the implementation through native Agent Bridge runs. It found no blocking correctness, privacy or lifecycle issue, and recommended preserving results when final cleanup fails; that recommendation was implemented with a regression test. The review run also confirmed a real host can omit applied effort, which the bridge marks unreported. Reviews were read-only; the implementing agent ran and inspected the tests independently.
+
 ## Limits
 
 - Native acceptance covers the specific Mac, Windows and Linux configurations above, with Opus 5.5 and a Sonnet 5.5 follow-up. It does not establish compatibility with every shell, operating-system version, model or enterprise policy.

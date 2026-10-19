@@ -3,11 +3,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { Bridge, startSchema, publicRun } from './service.js';
 import { BridgeError } from './types.js';
+import { createModelDiscovery } from './models.js';
 
 const id = z.string().uuid();
 const cursor = z.number().int().min(0).default(0);
 export function createMcpServer(bridge: Bridge) {
   const server = new McpServer({ name: 'agent-bridge', version: '0.1.0' });
+  const listModels = createModelDiscovery(bridge.settings);
   const answer = async (work: () => unknown | Promise<unknown>) => {
     try {
       const result = await work();
@@ -16,6 +18,10 @@ export function createMcpServer(bridge: Bridge) {
       return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof BridgeError ? error.code : error instanceof z.ZodError ? 'invalid_input' : 'operation_failed', message: error instanceof Error ? error.message : String(error) }) }] };
     }
   };
+  server.registerTool('list_models', {
+    description: "Read the installed Claude runtime's current model catalogue and reported effort capabilities. No inference prompt or saved run is created. Use value (alias) or resolvedModel in start_run; null effort fields mean unknown, not unsupported. This is runtime metadata, not a guarantee of account access or remaining quota. Refresh after changing account/runtime; no persistent cache is used.",
+    inputSchema: {}, annotations: { readOnlyHint: true, openWorldHint: true },
+  }, () => answer(listModels));
   server.registerTool('start_run', {
     description: 'Delegate to Claude in the background. Reuse conversationId for follow-ups and requestKey for retries of the SAME submission. Review is default. Write mode creates a separate Git worktree from explicit baseRef, without copying uncommitted changes. Queueing preserves order. Never submit again just because a call timed out: check its requestKey/run first. acknowledgeUncertain requires an informed decision after inspecting an interrupted conversation.',
     inputSchema: startSchema, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },

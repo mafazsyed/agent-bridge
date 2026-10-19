@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { config } from './config.js';
 import { Bridge, publicRun } from './service.js';
 import { serve } from './mcp.js';
+import { discoverModels } from './models.js';
 
 async function input(): Promise<string> {
   let text = '';
@@ -15,10 +16,14 @@ async function input(): Promise<string> {
 async function main() {
   const [command, arg, extra, cursor] = process.argv.slice(2);
   if (!command || command === '--help') {
-    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  start                   Read start_run JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor                  Check the local CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code. See README for permissions and recovery.');
+    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models                  List Claude models and effort capabilities\n  start                   Read start_run JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor                  Check the local CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code. See README for permissions and recovery.');
     return;
   }
-  const settings = config(command === 'doctor');
+  const settings = config(command === 'doctor' || command === 'models');
+  if (command === 'models') {
+    console.log(JSON.stringify(await discoverModels(settings), null, 2));
+    return;
+  }
   if (command === 'doctor') {
     const version = execFileSync(settings.executable, ['--version'], { encoding: 'utf8', timeout: 10_000, windowsHide: true }).trim();
     console.log(JSON.stringify({ node: process.version, claude: version, executable: settings.executable, stateDir: settings.stateDir, maxActive: settings.maxActive, authentication: 'Not tested; run claude auth login if a delegated task reports auth_required.' }, null, 2));

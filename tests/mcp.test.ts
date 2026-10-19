@@ -17,7 +17,7 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
   try {
     await server.connect(b); await client.connect(a);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'get_run', 'list_conversations', 'list_runs', 'start_run', 'wait_run']);
+    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'get_run', 'list_conversations', 'list_models', 'list_runs', 'start_run', 'wait_run']);
     const start = await client.callTool({ name: 'start_run', arguments: { requestKey: 'mcp-fixture', prompt: 'Review', cwd: root } });
     assert.equal(start.isError, undefined);
     const payload = (start.structuredContent as any).result;

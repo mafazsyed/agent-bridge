@@ -13,6 +13,8 @@ Use a current Claude Code version. The default Opus 5.5 model requires Claude Co
 On Windows, install the native `claude.exe`; npm `.cmd` wrappers are not executed through a shell. Saved jobs can be inspected and cancelled even if Claude has been removed. Starting new jobs requires the executable.
 
 ```sh
+git clone https://github.com/mafazsyed/agent-bridge.git
+cd agent-bridge
 npm ci
 npm run build
 node dist/cli.js doctor
@@ -51,6 +53,7 @@ Ask your MCP-enabled agent to delegate a review to Opus. It can use:
 
 | Tool | Purpose |
 | --- | --- |
+| `list_models` | Read Claude's live model catalogue and effort capabilities |
 | `start_run` | Start a job or queue a follow-up on a conversation |
 | `get_run` | Read status, results, pending input and progress pages |
 | `wait_run` | Wait up to 50 seconds for changes |
@@ -71,9 +74,11 @@ Example `start_run` input:
 }
 ```
 
-The default is review mode, Opus 5.5 and high effort. The account must have access to the requested model. The bridge does not configure automatic fallback; Claude Code resolves aliases and applies its own account policies. The runtime's reported model is recorded in the run's `started` event. Each new turn gets a new request key. Repeating the exact input with the same key returns the original job rather than dispatching it again. Follow-ups pass `conversationId` instead of `cwd`; their model and effort can be overridden per turn.
+The default is review mode, Opus 5.5 and high effort. The account must have access to the requested model. The bridge does not configure automatic fallback; Claude Code resolves aliases and applies its own account policies. The runtime's reported model and requested effort are recorded in the run's `started` event. When Claude reports the applied effort, `effortReported` is true and `effortApplied` contains its value (or null if no effort parameter applies). Otherwise `effortReported` is false: the applied effort is unknown, not necessarily the requested value. Each new turn gets a new request key. Repeating the exact input with the same key returns the original job rather than dispatching it again. Follow-ups pass `conversationId` instead of `cwd`; their model and effort can be overridden per turn.
 
-Opus is not required: `model` also accepts Claude Code aliases such as `sonnet`, `haiku` or `fable`, or an explicit model ID supported by your runtime and account. For example, ask Codex to delegate using Sonnet with medium effort. A follow-up can change models while retaining the same conversation; the override applies to that turn. Agent Bridge does not currently expose a model-list tool or an interactive picker. Claude Code's own `/model` command and the Agent SDK's `supportedModels()` catalogue are separate from the bridge's tools. See [Claude model configuration](https://code.claude.com/docs/en/model-config) for model availability and effort support.
+Opus is not required. Ask Codex to call `list_models`, or run `node dist/cli.js models`. The bridge queries the installed Claude Code runtime through the official Agent SDK's `supportedModels()`, without submitting a prompt, creating a saved run or using a model-task slot. Discovery can make network requests through Claude; it is not an offline entitlement check. It has a 20-second deadline. Overlapping calls within one MCP server share a probe; completed results are not cached.
+
+Each entry preserves Claude's `value` alias, `resolvedModel` when supplied, display name, description and reported effort support. Use `value` to follow Claude's alias selection or the resolved ID to request that version explicitly. Choose effort from `supportedEffortLevels`; null capability fields mean unknown, while `supportsEffort: false` means the runtime reports no effort support. The bridge's default remains high; Claude can ignore or cap effort according to the model and account policy. Account details from initialization are not returned. The catalogue is picker metadata, not a guarantee of entitlement or remaining quota; a missing model is not automatically rejected by the bridge. Refresh after changing account or runtime. The MCP catalogue uses the same executable and settings boundary as its delegated runs; a separately configured CLI can see a different catalogue. See [Claude model configuration](https://code.claude.com/docs/en/model-config).
 
 For implementation, add `"mode": "write", "baseRef": "HEAD"` to a **new** conversation. The bridge creates a branch and worktree from that commit. It leaves the original checkout, including uncommitted changes, alone. The result includes the worktree path. Review and integrate that diff deliberately; the bridge does not automatically commit, merge or push.
 
@@ -115,6 +120,8 @@ There is no exactly-once execution guarantee, no promise that work survives a ma
 The local SQLite ledger stores prompts, results, progress, permission input and workspace paths. It may contain sensitive task content. State directory and file modes are private on POSIX; Windows access depends on the user's filesystem ACLs. Point the state variable only at a dedicated directory: the bridge applies private directory permissions. The bridge adds no telemetry and does not log authentication environment values. Claude has its own data handling and authentication policies.
 
 `node dist/cli.js prune 30` removes bridge task content older than 30 days, retaining small idempotency receipts and conversation identities. It does not delete worktrees or Claude transcripts. SQLite page reclamation is not secure erasure.
+
+To retire a write conversation, first confirm it has no queued, running or waiting runs, inspect its worktree and preserve or integrate any wanted changes. From the source repository, use `git worktree remove "<saved cwd>"`, then `git branch -d "<saved branch>"`. These commands refuse dirty worktrees or unmerged branches; inspect a refusal instead of forcing deletion. Do not resume a retired conversation. Its ledger record and small readiness receipt remain; automatic worktree retirement is not implemented yet.
 
 ## Development and validation
 
