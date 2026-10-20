@@ -138,6 +138,12 @@ test('Claude native callback forwards an edit instead of auto-allowing like the 
     assert.equal((await hook(options, 'Bash', { command: 'echo test' }) as any).hookSpecificOutput.permissionDecision, 'ask');
   });
 });
+for (const permissions of [null, { runtime: 'claude' as const, permissionMode: 'default' as const }]) test(`usage storage failure cannot interrupt Claude result/flush: ${JSON.stringify(permissions)}`, async () => {
+  const result = await runFixture(permissions, async (_options, f) => {
+    f.bridge.store.recordUsage = () => { throw new Error('Simulated disk failure'); };
+  });
+  assert.equal(result.received, true); assert.equal(result.drained, true); assert.equal(result.closed, true);
+});
 for (const override of [{ applied: 'default' }, { setError: true }, { autoSupported: false }, { unknownModel: true }, { hooksApplied: false }]) test(`Claude unavailable mode refuses before prompt: ${JSON.stringify(override)}`, async () => {
   await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'auto' }, async () => { throw new Error('no tools'); }, override), { code: 'permissions_unavailable', received: false, closed: true });
 });

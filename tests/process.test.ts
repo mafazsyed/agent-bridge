@@ -9,6 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { discoverModels } from '../src/models.js';
+import { discoverAccountLimits } from '../src/limits.js';
 
 // Uses the actual compiled CLI, detached worker, SDK transport and SQLite. Only inference is fake.
 execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.build.json']);
@@ -76,6 +77,41 @@ test('CLI and real MCP model discovery use runtime metadata without a run or inf
     assert.ok(!messages.some(m => m.type === 'user'), 'Discovery must never dispatch an inference turn');
   } finally { await client.close(); await f.cleanup(); }
 });
+test('CLI and real MCP account limits send no inference, skip behavioral scans, and preserve account privacy', async () => {
+  const f = await fixture();
+  const client = new Client({ name: 'limits-acceptance', version: '1' });
+  try {
+    const cliResult = await f.command(['limits', 'claude']);
+    assert.equal(existsSync(f.env.AGENT_BRIDGE_HOME), false);
+    const env = Object.fromEntries(Object.entries(f.env).filter((item): item is [string, string] => typeof item[1] === 'string'));
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [cli, 'mcp'], env }));
+    const replies = await Promise.all(Array.from({ length: 3 }, () => client.callTool({ name: 'get_account_limits', arguments: { runtime: 'claude' } })));
+    for (const reply of replies) {
+      assert.equal(reply.isError, undefined);
+      assert.deepEqual((reply.structuredContent as any).result.buckets, cliResult.buckets);
+      assert.equal(JSON.stringify(reply).includes('PRIVATE'), false);
+    }
+    const messages = readFileSync(join(f.root, 'protocol.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const reads = messages.filter(m => m.request?.subtype === 'get_usage');
+    assert.equal(reads.length, 2); assert.ok(reads.every(m => m.request.skip_behaviors === true));
+    assert.equal(messages.some(m => m.type === 'user'), false);
+    assert.deepEqual(await f.command(['runs']), []);
+  } finally { await client.close(); await f.cleanup(); }
+});
+
+test('account limits timeout terminates its actual SDK child', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(discoverAccountLimits({ executable: f.env.AGENT_BRIDGE_CLAUDE_PATH, stateDir: f.env.AGENT_BRIDGE_HOME, maxActive: 1, staleMs: 120_000 }, 'claude', {
+      timeoutMs: 2000, openClaude: input => query({ ...input, options: { ...input.options, env: { ...f.env, AGENT_BRIDGE_FIXTURE_INIT_HANG: '1' } } }),
+    }), { code: 'limits_timeout' });
+    const [{ pid }] = readFileSync(join(f.root, 'processes.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    let alive = true;
+    for (let n = 0; n < 100 && alive; n++) { try { process.kill(pid, 0); await delay(50); } catch { alive = false; } }
+    assert.equal(alive, false);
+    assert.equal(existsSync(f.env.AGENT_BRIDGE_HOME), false);
+  } finally { await f.cleanup(); }
+});
 
 test('model discovery timeout terminates the actual SDK child process', async () => {
   const f = await fixture();
@@ -104,9 +140,11 @@ test('detached work survives host exit; queued turns and retries dispatch once',
     const b = await f.command(['start'], { requestKey: 'second', conversationId: a.conversation.id, prompt: 'fixture:effort' });
     const first = await f.getTerminal(a.run.id);
     assert.equal(first.run.status, 'succeeded');
+    assert.equal(first.run.usage.cumulative.estimatedCostUsd, 0.1);
     assert.equal(first.events.find((e: any) => e.type === 'started').data.effortReported, false);
     const second = await f.getTerminal(b.run.id);
     assert.equal(second.run.status, 'succeeded');
+    assert.equal(second.run.usage.cumulative.estimatedCostUsd, 0.2, 'Resumed cumulative cost must not be summed with the first snapshot');
     const started = second.events.find((e: any) => e.type === 'started').data;
     assert.equal(started.effortRequested, 'high'); assert.equal(started.effortApplied, 'medium');
     assert.equal(started.effortReported, true);
@@ -197,5 +235,7 @@ test('a native shutdown crash retains the completed answer with its uncertainty 
     assert.equal(result.run.errorCode, 'unknown_outcome');
     assert.match(result.run.result, /Completion could not be verified/);
     assert.match(result.run.result, /fixture done/);
+    assert.equal(result.run.usage.cumulative.estimatedCostUsd, 0.1);
+    assert.equal(result.run.usage.turn.tokens.output, 8);
   } finally { await f.cleanup(); }
 });

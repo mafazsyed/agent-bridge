@@ -55,6 +55,24 @@ test('FIFO follows insertion order even when the wall clock moves backwards', ()
   } finally { store.close(); }
 });
 
+test('unlimited admits more than four conversations but still serializes each conversation', async () => {
+  const dir = stateDir(), store = new Store(dir);
+  try {
+    const c = conversation();
+    const first = queue(store, c), second = queue(store, c);
+    const jobs = [first, ...Array.from({ length: 5 }, () => queue(store, conversation()))];
+    const claims = await Promise.all(jobs.map(job => child(dir, `out = store.claimRun(args[0], args[1], 'unlimited')`, job.id, job.token)));
+    assert.deepEqual(claims, [true, true, true, true, true, true]);
+    assert.equal(store.claimRun(second.id, second.token, 'unlimited'), false);
+    store.finishRun(first.id, first.token, 'succeeded');
+    assert.equal(store.claimRun(second.id, second.token, 'unlimited'), true);
+    const extra = queue(store, conversation());
+    assert.equal(store.claimRun(extra.id, extra.token, 6), false);
+    store.finishRun(second.id, second.token, 'succeeded');
+    assert.equal(store.claimRun(extra.id, extra.token, 6), true);
+  } finally { store.close(); }
+});
+
 test('cancellation and expiry invalidate even previously answered commands', () => {
   const clock = new Clock(), store = new Store(stateDir(), clock.now);
   try {

@@ -3,7 +3,18 @@ import { join, resolve } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { BridgeError, type Runtime } from './types.js';
 
-export interface Config { stateDir: string; executable: string; codexExecutable?: string; maxActive: number; staleMs: number }
+export type ConcurrencyLimit = number | 'unlimited';
+export interface Config { stateDir: string; executable: string; codexExecutable?: string; maxActive: ConcurrencyLimit; staleMs: number }
+
+export function parseConcurrency(raw = '1'): ConcurrencyLimit {
+  raw = raw.trim().toLowerCase();
+  if (raw === 'unlimited') return raw;
+  const value = Number(raw);
+  if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(value)) {
+    throw new BridgeError('invalid_config', 'AGENT_BRIDGE_MAX_ACTIVE must be a positive safe integer or unlimited.');
+  }
+  return value;
+}
 
 const isFile = (path: string) => { try { return statSync(path).isFile(); } catch { return false; } };
 const pathDirs = (path: string | undefined, platform: NodeJS.Platform) => (path ?? '').split(platform === 'win32' ? ';' : ':').filter(Boolean);
@@ -42,8 +53,7 @@ export function config(requireRuntime: boolean | Runtime = true): Config {
   }
   const codexExecutable = scriptShim ? undefined : explicitCodex ? resolve(explicitCodex) : discoverCodex();
   if (!codexExecutable && required === 'codex') throw new BridgeError('cli_missing', 'Install Codex and run codex login, or set AGENT_BRIDGE_CODEX_PATH to its native executable.');
-  const maxActive = Number(process.env.AGENT_BRIDGE_MAX_ACTIVE ?? 1);
-  if (!Number.isInteger(maxActive) || maxActive < 1 || maxActive > 4) throw new BridgeError('invalid_config', 'AGENT_BRIDGE_MAX_ACTIVE must be 1–4.');
+  const maxActive = parseConcurrency(process.env.AGENT_BRIDGE_MAX_ACTIVE);
   return {
     stateDir: resolve(process.env.AGENT_BRIDGE_HOME ?? join(homedir(), '.agent-bridge')), executable: executable ?? '',
     ...(codexExecutable ? { codexExecutable } : {}), maxActive, staleMs: 120_000,

@@ -25,6 +25,12 @@ input.on('line', line => {
   if (process.env.AGENT_BRIDGE_FIXTURE_TRACE) appendFileSync(process.env.AGENT_BRIDGE_FIXTURE_TRACE, JSON.stringify(event) + '\n');
   if (event.type === 'control_request') {
     if (process.env.AGENT_BRIDGE_FIXTURE_INIT_HANG) return;
+    if (event.request.subtype === 'get_usage') {
+      send({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: {
+        rate_limits_available: true, rate_limits: { five_hour: { utilization: 25, resets_at: '2026-10-20T10:00:00Z' } },
+        session: { secret: 'PRIVATE' }, behaviors: { secret: 'PRIVATE' },
+      } } }); return;
+    }
     if (event.request.subtype === 'set_permission_mode') permissionMode = event.request.mode;
     send({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: { current_permission_mode: permissionMode, hooks_applied: true, commands: [], models: [{ value: 'fixture-alias', resolvedModel: 'fixture-model-1', displayName: 'Fixture model', description: 'Metadata only', supportsEffort: true, supportsAutoMode: true, supportedEffortLevels: ['low', 'high'] }], agents: [], account: { email: 'private-fixture@example.invalid', organization: 'private-fixture-org' } } } });
   }
@@ -34,7 +40,7 @@ input.on('line', line => {
   send({ type: 'system', subtype: 'init', session_id: session, model, ...(text.includes('fixture:effort') ? { effort: 'medium' } : {}), tools: [], mcp_servers: [], permissionMode, claude_code_version: '2.1.302', uuid: randomUUID() });
   if (text.includes('fixture:crash')) { setTimeout(() => process.exit(2), 100); return; }
   const done = () => {
-    send({ type: 'result', subtype: 'success', session_id: text.includes('fixture:identity') ? randomUUID() : session, is_error: false, result: text.includes('fixture:delay') ? 'delayed fixture done' : 'fixture done', duration_ms: 100, duration_api_ms: 0, num_turns: 1, total_cost_usd: 0, modelUsage: {}, usage: {}, permission_denials: [], uuid: randomUUID() });
+    send({ type: 'result', subtype: 'success', session_id: text.includes('fixture:identity') ? randomUUID() : session, is_error: false, result: text.includes('fixture:delay') ? 'delayed fixture done' : 'fixture done', duration_ms: 100, duration_api_ms: 0, num_turns: 1, total_cost_usd: value('--resume') ? 0.2 : 0.1, modelUsage: {}, usage: { input_tokens: 12, output_tokens: 8 }, permission_denials: [], uuid: randomUUID() });
     resultSent = true;
     if (text.includes('fixture:flush-crash')) { setTimeout(() => process.exit(2), 20); return; }
     if (flushOnEof) { flush(); return; }

@@ -8,6 +8,7 @@ import { prepareWorktree } from './git.js';
 import { processIdentity, workerAlive } from './process-identity.js';
 import { appendFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
+import { tolerateBusy, queueDelay } from './contention.js';
 
 async function main() {
   const [, , stateDir, runId, token] = process.argv;
@@ -28,14 +29,19 @@ async function main() {
     attached = store.attachWorker(runId, token, process.pid, identity);
     if (!attached) return;
     const settings = { ...config(false), stateDir };
-    while (!store.claimRun(runId, token, settings.maxActive)) {
-      const current = store.getRun(runId);
-      if (TERMINAL.includes(current.status)) return;
-      if (current.cancelRequested || abort.signal.aborted) { store.finishRun(runId, token, 'cancelled', null, 'cancelled'); return; }
-      if (!store.heartbeat(runId, token)) return;
-      store.reconcile(Date.now() - settings.staleMs, workerAlive);
-      if (Date.now() - current.createdAt > 24 * 60 * 60 * 1000) { store.finishRun(runId, token, 'failed', null, 'queue_timeout'); return; }
-      await delay(250);
+    let lastHeartbeat = Date.now(), lastReconcile = 0;
+    while (true) {
+      try {
+        if (store.claimRun(runId, token, settings.maxActive)) { lastHeartbeat = Date.now(); break; }
+        const current = store.getRun(runId);
+        if (TERMINAL.includes(current.status)) return;
+        if (current.cancelRequested || abort.signal.aborted) { store.finishRun(runId, token, 'cancelled', null, 'cancelled'); return; }
+        if (!store.heartbeat(runId, token)) return;
+        lastHeartbeat = Date.now();
+        if (Date.now() - lastReconcile > 10_000) { store.reconcile(Date.now() - settings.staleMs, workerAlive); lastReconcile = Date.now(); }
+        if (Date.now() - current.createdAt > 24 * 60 * 60 * 1000) { store.finishRun(runId, token, 'failed', null, 'queue_timeout'); return; }
+      } catch (error) { if (!tolerateBusy(error, lastHeartbeat, settings.staleMs)) throw error; }
+      await delay(queueDelay());
     }
     const run = store.getRun(runId);
     const conversation = store.getConversation(run.conversationId);
@@ -52,11 +58,11 @@ async function main() {
           return; // Never keep renewing a lease after abort.
         }
         if (!store.heartbeat(runId, token)) reason = 'lease_lost';
-        else if (store.getRun(runId).cancelRequested) reason = 'cancelled';
-        else if (Date.now() - run.startedAt! > run.timeoutMs) reason = 'timeout';
+        else { lastHeartbeat = Date.now(); if (store.getRun(runId).cancelRequested) reason = 'cancelled'; }
+        if (!reason && Date.now() - run.startedAt! > run.timeoutMs) reason = 'timeout';
         if (reason) abort.abort();
-      } catch { reason = 'lease_lost'; abort.abort(); }
-    }, 300);
+      } catch (error) { if (!tolerateBusy(error, lastHeartbeat, settings.staleMs)) { reason = 'lease_lost'; abort.abort(); } }
+    }, 1000);
     const result = conversation.runtime === 'codex' ? await runCodex(settings, store, run, conversation, token, abort) : await (async () => {
       const value = await runClaude(settings, store, run, conversation, token, abort);
       return { text: 'result' in value ? value.result : value.errors.join('\n'), success: !value.is_error, errorCode: resultErrorCode(value) };

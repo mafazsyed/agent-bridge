@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { BridgeError, NATIVE_DEFAULT, QUESTION_TOOLS, TERMINAL, type Conversation, type Effort, type Event, type Permission, type Run, type RunStatus } from './types.js';
 import { runtimePermissionsSchema, type RuntimePermissions } from './permission-options.js';
+import type { ConcurrencyLimit } from './config.js';
+import type { RunUsage } from './usage.js';
 
 export interface CreateRunInput {
   permissions?: RuntimePermissions | null;
@@ -23,7 +25,7 @@ type Param = string | number | null;
 
 const ACTIVE = `status IN ('queued', 'running', 'needs_input')`;
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const RUNTIME_COLUMN = `runtime TEXT NOT NULL DEFAULT 'claude' CHECK (runtime IN ('claude', 'codex'))`;
 
 // Private columns: ord gives deterministic insertion order, ack_unknown_through is the highest unknown
@@ -113,6 +115,7 @@ const toConversation = (r: Row): Conversation => ({
 });
 
 const toRun = (r: Row): Run => ({
+  usage: r.usage_json == null ? null : JSON.parse(r.usage_json as string),
   permissions: r.permissions_json == null ? null : runtimePermissionsSchema.parse(JSON.parse(r.permissions_json as string)),
   id: r.id as string,
   conversationId: r.conversation_id as string,
@@ -183,6 +186,7 @@ export class Store {
       const columns = this.all('PRAGMA table_info(runs)');
       if (!columns.some(c => c.name === 'worker_identity')) this.db.exec('ALTER TABLE runs ADD COLUMN worker_identity TEXT');
       if (!columns.some(c => c.name === 'permissions_json')) this.db.exec('ALTER TABLE runs ADD COLUMN permissions_json TEXT');
+      if (!columns.some(c => c.name === 'usage_json')) this.db.exec('ALTER TABLE runs ADD COLUMN usage_json TEXT');
       const conversationColumns = this.all('PRAGMA table_info(conversations)');
       if (!conversationColumns.some(c => c.name === 'runtime')) this.db.exec(`ALTER TABLE conversations ADD COLUMN ${RUNTIME_COLUMN}`);
       if (!conversationColumns.some(c => c.name === 'native_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN native_id TEXT');
@@ -289,7 +293,13 @@ export class Store {
     return this.run(`UPDATE runs SET heartbeat_at = ? WHERE id = ? AND worker_token = ? AND ${ACTIVE}`, this.now(), runId, token) === 1;
   }
 
-  claimRun(runId: string, token: string, maxActive = 1): boolean {
+  recordUsage(runId: string, token: string, usage: RunUsage): boolean {
+    return this.run(`UPDATE runs SET usage_json = ? WHERE id = ? AND worker_token = ? AND status IN ('running', 'needs_input')`,
+      JSON.stringify(usage), runId, token) === 1;
+  }
+
+  claimRun(runId: string, token: string, maxActive: ConcurrencyLimit = 1): boolean {
+    if (maxActive !== 'unlimited' && (!Number.isSafeInteger(maxActive) || maxActive < 1)) throw new BridgeError('invalid_config', 'Invalid concurrency limit.');
     const now = this.now();
     return this.tx(() => {
       const r = this.one('SELECT * FROM runs WHERE id = ?', runId);
@@ -318,7 +328,7 @@ export class Store {
       );
       if (waiting) return false;
       const active = this.one(`SELECT COUNT(*) AS n FROM runs WHERE status IN ('running', 'needs_input')`)!.n as number;
-      if (active >= maxActive) return false;
+      if (maxActive !== 'unlimited' && active >= maxActive) return false;
       this.run(`UPDATE runs SET status = 'running', started_at = ?, updated_at = ?, heartbeat_at = ? WHERE ord = ?`, now, now, now, ord);
       return true;
     });

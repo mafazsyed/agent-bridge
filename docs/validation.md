@@ -118,11 +118,36 @@ Opus 5.5's review prompted additional regressions for every hung startup control
 
 Opus 5.5 completed a final read-only review of the fixes on 2026-10-20 and found no remaining actionable bugs. It checked answer retention after failed shutdown, cancellation after a delivered result, numeric RPC error handling and missing hook-mode rejection. The implementing agent independently ran the final cross-platform checks above. This is source review and test evidence, not a guarantee of compatibility with every native runtime version.
 
-A no-inference capability probe on 2026-10-20 confirmed native account limits through Codex `account/rateLimits/read` and Claude SDK `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })`. Claude's method is explicitly unstable. These are feasibility checks, not implemented Bridge tools; no account details or usage snapshots are committed.
+A no-inference capability probe on 2026-10-20 confirmed native account limits through Codex `account/rateLimits/read` and Claude SDK `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })`. Claude's method is explicitly unstable. These initial feasibility checks preceded the implemented tools and acceptance below; no account details or usage snapshots are committed.
 
 An isolated Mac ledger with `maxActive: 2` also ran Claude Sonnet 5.5 / requested low effort and Codex GPT-6.1 Sol / medium effort concurrently; both succeeded and their running states overlapped. A follow-up changed that same Claude session to Haiku 5.5 / requested medium effort and correctly recalled a marker from the Sonnet turn. Claude reported the changed model and unchanged session ID, but omitted applied effort, so the effort values remain requested rather than independently verified. The regular shared ledger's concurrency setting was unchanged.
 
 Run `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-permissions.ts` after building to repeat the native acceptance. Set `AGENT_BRIDGE_LIVE_RUNTIME=claude` or `codex` for a single runtime; this is an explicit test selection, not a model fallback. It consumes native account usage and writes isolated temporary workspaces plus a local evidence.json. Codex automatic-review testing verifies an actual escalated command succeeds without a Bridge permission response, not just a returned configuration value. These Windows cases run over SSH because they use native file patches and an explicitly escalated command; they do not re-claim general Windows sandbox process compatibility under SSH.
+
+## Usage, account limits and concurrency (2026-10-20)
+
+| Final check | macOS | Ubuntu | Windows |
+| --- | --- | --- | --- |
+| Automated suite | 139 passed | 139 passed | 138 passed; POSIX trailing-space case skipped |
+| Typecheck and build | Passed | Passed | Passed |
+| Claude account limits through stdio MCP, without inference | Available | Available | Available |
+| Codex account limits through stdio MCP, without inference | Available | Available | Available |
+| Real Claude new turn and resumed turn, usage retained | Passed | Passed | Passed |
+| Real Codex new turn and resumed turn, usage retained | Passed | Passed | Passed |
+
+Native acceptance used the same installed runtimes and Node versions described above. Each host's isolated MCP client discovered models, selected Claude Sonnet and Codex's default model with reported low effort support, started both jobs and resumed each conversation. All twelve turns succeeded, recalled a random marker without tools and returned persisted native usage through `get_run`. Requested effort is not independently measured. Account probes returned six Claude buckets and one Codex bucket on these accounts; the number is not assumed by the implementation. Account snapshots are read only on explicit request and never stored. The live evidence retains just their status, timestamp, bucket count and experimental flag.
+
+Resume checks retained earlier model token totals and estimated spend rather than summing cumulative snapshots. In the final Mac run, Codex's total rose from 11,063 to 22,173 tokens; its last snapshot was 11,110, so the resumed total includes the prior total plus that snapshot. Claude's native estimated cumulative cost rose from $0.0111767 to $0.0139421. These are telemetry observations, not bills or account-quota deductions. A separate real Mac Codex probe observed `thread/tokenUsage/updated` before `turn/completed`; protocol regressions cover wrong-thread/turn notifications and interrupted partial snapshots.
+
+Schema v4 adds nullable run usage without changing prior idempotency fingerprints. Regression tests cover migration from v3, unknown old usage, persistence through reopen and content pruning, terminal/worker lease fencing, negative or missing counters, zeroed error results and cumulative scope. Storage failures cannot change a native result or interrupt Claude's transcript flush: both adapters have injected-failure tests, and a real SQLite lock held for five seconds leaves the run active with unknown usage until a later write succeeds.
+
+Limits tests cover native request shapes without inference, account-field filtering, denial flags, reset-time conversion, unavailable versus unsupported responses, authentication and timeout errors, empty multi-bucket fallback, cancellation/cleanup and coalescing only pending requests. Claude's SDK quota method remains experimental. Missing or partial native data is not replaced with invented values.
+
+The fixed four-job ceiling is removed; a positive safe integer or `unlimited` is accepted, with the existing default of one preserved. Six separate worker processes can claim independent jobs with no finite limit, while turns sharing a conversation remain queued. A finite limit of six is also enforced. Configuration round trips, queue backoff and bounded tolerance for SQLite contention have regression coverage. This is not a large-scale concurrency soak test or a promise of unlimited machine/account capacity.
+
+Opus 5.5/high reviewed the design, implementation and fixes through Agent Bridge. Its findings about telemetry storage failures, empty Codex bucket maps, falsely available empty quotas and an unverified extra-usage percentage scale were corrected and covered by regressions. Its final read-only review found no remaining blockers, conditional on the final cross-platform checks above, which then passed. Existing native permission acceptance is retained as prior evidence; this change does not claim another exhaustive live run of all permission modes.
+
+After building, repeat the native usage checks with `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-usage.ts`. This consumes four short model turns and writes an isolated temporary evidence file. Detailed test logs and private state remain outside committed source.
 
 ## Limits
 

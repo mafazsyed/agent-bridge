@@ -20,6 +20,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
     case 'configRequirements/read': send({ id: m.id, error: { code: -32601, message: 'Localized unsupported request' } }); break;
     case 'initialize': if (scenario === 'startup-hang') break; reply(m, { userAgent: 'fixture/1' }); break;
     case 'account/read': reply(m, { account: scenario === 'signed-out' ? null : { type: 'chatgpt' }, requiresOpenaiAuth: true }); break;
+    case 'account/rateLimits/read': reply(m, { rateLimits: { limitId: 'codex', primary: { usedPercent: 12, resetsAt: 1790000000, windowDurationMins: 300 } }, accountId: 'PRIVATE' }); break;
     case 'config/read': reply(m, { config: { model: 'native-model', model_reasoning_effort: 'high',
       features: { apps: false, plugins: false, hooks: false, memories: false, multi_agent: false, multi_agent_v2: false, request_permissions_tool: false, code_mode: { enabled: false }, remote_control: false, js_repl: false, browser_use: false, computer_use: false, remote_plugin: false, plugin_hooks: false, skill_search: false, skill_mcp_dependency_install: false },
       skills: { bundled: { enabled: false }, include_instructions: false }, web_search: 'disabled',
@@ -39,6 +40,13 @@ createInterface({ input: process.stdin }).on('line', async line => {
       notify('turn/started', { threadId, turn: { id: turnId, status: 'inProgress' } });
       if (scenario === 'early-complete') { complete(); reply(m, { turn: { id: turnId } }); break; }
       reply(m, { turn: { id: turnId } });
+      if (scenario.startsWith('usage')) {
+        for (const [eventThread, eventTurn, total] of [[threadId, turnId, 80], ['foreign', turnId, 999], [threadId, 'foreign', 999]]) {
+          notify('thread/tokenUsage/updated', { threadId: eventThread, turnId: eventTurn, tokenUsage: {
+            total: { inputTokens: total, outputTokens: 20, totalTokens: total + 20 }, last: { inputTokens: 10, outputTokens: 5 } } });
+        }
+        if (scenario === 'usage-interrupted') { complete('interrupted'); break; }
+      }
       if (scenario === 'cancel' || scenario === 'stuck-cancel') {
         const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
         appendFileSync(record, JSON.stringify({ grandchild: child.pid }) + '\n'); break;

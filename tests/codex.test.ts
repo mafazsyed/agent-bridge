@@ -9,6 +9,7 @@ import { Bridge } from '../src/service.js';
 import { CodexClient } from '../src/codex-client.js';
 import { codexModels } from '../src/codex-models.js';
 import { runCodex } from '../src/codex-runtime.js';
+import { discoverAccountLimits } from '../src/limits.js';
 const fixture = fileURLToPath(new URL('./fixtures/codex-app-server.mjs', import.meta.url));
 function setup(scenario: string, mode: 'review' | 'write' = 'review') {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'bridge-codex-'))); const record = join(root, 'rpc.jsonl');
@@ -26,6 +27,37 @@ test('Codex discovery reads all native model pages without creating a thread', a
   const f = setup('discovery'); const client = f.open();
   try { await client.initialize(); assert.equal((await codexModels(client))[0]?.model, 'native-model'); await client.close(); assert.equal(f.events().filter(e => e.method?.startsWith('thread/') || e.method?.startsWith('turn/')).length, 0); }
   finally { await client.close(); f.clean(); }
+});
+test('Codex account limit probe uses real stdio without creating threads or leaking identity', async () => {
+  const f = setup('limits');
+  try {
+    const result = await discoverAccountLimits(f.settings, 'codex', { openCodex: f.open });
+    assert.equal(result.buckets[0]?.windows[0]?.window?.usedPercent, 12);
+    assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
+    assert.equal(f.events().some(e => /^(thread|turn)\//.test(e.method ?? '')), false);
+  } finally { f.clean(); }
+});
+for (const scenario of ['usage', 'usage-interrupted']) test(`Codex usage filters foreign identities and retains partial accounting: ${scenario}`, async () => {
+  const f = setup(scenario);
+  try {
+    const work = runCodex(f.settings, f.bridge.store, f.run, f.conversation, 'fixture', f.abort, f.open);
+    if (scenario === 'usage-interrupted') await assert.rejects(work, { code: 'unknown_outcome' });
+    else await work;
+    const usage = f.bridge.get(f.run.id).run.usage;
+    assert.equal(usage?.cumulative.tokens?.total, 100);
+    assert.equal(usage?.lastReported?.input, 10);
+    assert.equal(usage?.status, scenario === 'usage' ? 'reported' : 'partial');
+  } finally { f.clean(); }
+});
+test('usage storage failure cannot fail Codex transport or change a completed result', async () => {
+  const f = setup('usage');
+  let attempts = 0;
+  try {
+    f.bridge.store.recordUsage = () => { attempts++; throw new Error('Simulated disk failure'); };
+    const result = await runCodex(f.settings, f.bridge.store, f.run, f.conversation, 'fixture', f.abort, f.open);
+    assert.equal(result.success, true); assert.equal(result.text, 'native result');
+    assert.equal(attempts, 2, 'Exercise both the streamed snapshot and terminal update');
+  } finally { f.clean(); }
 });
 for (const scenario of ['basic', 'early-complete', 'unknown-request']) test(`Codex completes ${scenario} and records native identity before dispatch`, async () => {
   const f = setup(scenario);

@@ -1,4 +1,5 @@
 import type { RuntimePermissions } from './permission-options.js';
+import type { RunUsage } from './usage.js';
 export type Mode = 'review' | 'write';
 export type Runtime = 'claude' | 'codex';
 export const RUNTIMES = ['claude', 'codex'] as const satisfies readonly Runtime[];
@@ -31,6 +32,7 @@ export interface Conversation {
   createdAt: number;
 }
 export interface Run {
+  usage?: RunUsage | null;
   // Resolved at submission, independent of subsequent queued follow-ups.
   permissions?: RuntimePermissions | null;
   id: string;

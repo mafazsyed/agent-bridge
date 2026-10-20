@@ -177,11 +177,27 @@ Broad access is opt-in through the explicit selection. Host agents must have the
 
 ## Parallel jobs, model changes and forks
 
-Multiple conversations can use different runtimes, models, effort levels and permission selections. `AGENT_BRIDGE_MAX_ACTIVE` allows 1–4 active jobs per shared state directory (default 1); additional jobs queue. A job waiting for approval occupies a slot. Turns within one conversation remain serialized. Configure the same limit in every client sharing that state directory. Workers cannot recursively delegate through Bridge.
+Multiple conversations can use different runtimes, models, effort levels and permission selections. `AGENT_BRIDGE_MAX_ACTIVE` accepts any positive safe integer or `unlimited` (default 1); there is no four-job ceiling. Additional jobs queue when a finite limit is reached. A job waiting for approval occupies a slot. Turns within one conversation remain serialized even with unlimited concurrency. Configure the same limit in every client sharing that state directory. Workers cannot recursively delegate through Bridge. Every queued job has a worker process, and every active job also starts a native runtime; choose concurrency to suit your machine and account quota. Queued polling backs off with jitter, and brief SQLite contention is retried within the lease window.
 
 To change model or effort, submit the next `start_run` with the existing `conversationId` and the desired values from `list_models`. This preserves the native history and workspace. Overrides apply only to that run: an omitted value on a later turn returns to the saved conversation default. Bridge does not change models during a running turn. Switching between Claude and Codex requires a new conversation.
 
-Bridge does not yet expose conversation forking or usage/limit reporting. Both runtimes have native session-fork support, but a conversation fork is not a filesystem snapshot; write-worktree handling needs an explicit policy before Bridge can offer it safely. Native account limits are also distinct from a run's token usage or estimated cost. Neither should be inferred from a successful model-list call.
+Bridge does not yet expose conversation forking. Both runtimes have native session-fork support, but a conversation fork is not a filesystem snapshot; write-worktree handling needs an explicit policy before Bridge can offer it safely.
+
+## Usage and account limits
+
+`get_run`, `wait_run` and `list_runs` include `run.usage` when the native runtime reports it. This is passive accounting: it does not add model calls. Old runs and turns with no usage report have `null`; missing counters remain `null`, not zero. Usage survives restarts and content pruning. A snapshot marked `reported` means native telemetry arrived, not that the run succeeded; check the run status too.
+
+| Runtime | Recorded values | Scope |
+| --- | --- | --- |
+| Claude | Input/output and cache tokens in `turn` | Current turn's main agent loop; excludes auxiliary calls |
+| Claude | `cumulative.models` and `cumulative.estimatedCostUsd` | Native cumulative totals, including saved spend restored on resume; estimates, not bills |
+| Codex | `cumulative.tokens`, `lastReported`, context window | Native thread total and native `last` snapshot; no fabricated per-turn total or cost |
+
+Never sum cumulative snapshots across runs. Claude versions before 2.1.277 reported query totals instead of restoring saved session spend; `cumulative.scope` records that distinction when the runtime version is known. Error results with zeroed counters are marked unavailable. Interrupted Codex work keeps the latest partial snapshot. Token categories overlap: Codex cached input is included in input and reasoning in output, so do not add those categories to totals again. Claude cache input is separate from its regular input. We do not subtract snapshots to estimate one run's cost, because sessions can also be resumed outside Bridge or cleared.
+
+Use `get_account_limits({"runtime":"claude"})` or `get_account_limits({"runtime":"codex"})` for a fresh account-wide quota snapshot. The CLI equivalent is `node dist/cli.js limits claude` (or `codex`). It returns utilization windows, reset times in ISO format, native availability/denial flags and supported credit-availability indicators. These include other activity on the account. They cannot be attributed to a Bridge run or converted to cost. Native denial flags take precedence; a percentage or reset time does not promise access.
+
+The limits probe starts no inference, consumes no job slot, changes no conversation or settings and stores no account snapshot. Concurrent reads are coalesced; completed responses are not cached. Account identifiers, balances, spend amounts, reset-credit IDs, behavioral scans and raw runtime diagnostics are excluded. API-key accounts may have no plan limits. Unsupported APIs and unavailable limits are distinguished from authentication errors, timeouts and other failures. Claude's account probe uses an explicitly experimental SDK API and can become unavailable after an upstream change.
 
 ## Lifetimes and recovery
 
@@ -205,7 +221,7 @@ There is no exactly-once execution guarantee, no promise that work survives a ma
 | `AGENT_BRIDGE_HOME` | Dedicated `~/.agent-bridge` state directory |
 | `AGENT_BRIDGE_CLAUDE_PATH` | Native `claude` / `claude.exe` found on PATH |
 | `AGENT_BRIDGE_CODEX_PATH` | Native `codex` / `codex.exe`; standard npm native binary discovery on Windows |
-| `AGENT_BRIDGE_MAX_ACTIVE` | `1` (allowed range 1–4) |
+| `AGENT_BRIDGE_MAX_ACTIVE` | `1` (positive safe integer or `unlimited`) |
 
 The local SQLite ledger stores prompts, results, progress, permission input and workspace paths. It may contain sensitive task content. State directory and file modes are private on POSIX; Windows access depends on the user's filesystem ACLs. Point the state variable only at a dedicated directory: the bridge applies private directory permissions. The bridge adds no telemetry and does not log authentication environment values. Claude has its own data handling and authentication policies.
 

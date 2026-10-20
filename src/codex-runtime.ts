@@ -8,6 +8,7 @@ import { CodexClient, CODEX_CONFIG } from './codex-client.js';
 import { codexModels } from './codex-models.js';
 import { isDeepStrictEqual } from 'node:util';
 import { codexPermissionOptions, type CodexPermissionOptions } from './permission-options.js';
+import { codexUsage, saveUsage, type RunUsage } from './usage.js';
 
 export interface RuntimeResult { text: string; success: boolean; errorCode: string | null }
 const questionMethod = 'item/tool/requestUserInput';
@@ -105,6 +106,7 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
   const client = open(settings.codexExecutable, conversation.cwd);
   let threadId: string | null = conversation.nativeId ?? null;
   let turnId: string | null = null; let dispatched = false; let finished = false;
+  let usage: RunUsage | null = null;
   let resolveTerminal!: (p: any) => void; let rejectTerminal!: (e: Error) => void;
   const terminal = new Promise<any>((resolve, reject) => { resolveTerminal = resolve; rejectTerminal = reject; });
   void terminal.catch(() => {});
@@ -118,6 +120,12 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
     if (method === 'turn/started' && !turnId) turnId = p.turn?.id ?? null;
     const eventTurn = p.turnId ?? p.turn?.id;
     if (!eventTurn || (turnId && eventTurn !== turnId)) return;
+    if (method === 'thread/tokenUsage/updated') {
+      // Do not attach an early/foreign turn's usage before our native turn identity is known.
+      if (!turnId || eventTurn !== turnId) return;
+      const snapshot = codexUsage(p.tokenUsage);
+      if (snapshot) { usage = snapshot; saveUsage(store, run.id, token, usage); }
+    }
     if (method === 'item/started' && p.item?.type === 'fileChange') permissions.fileItems.set(p.item.id, p.item.changes);
     if (method === 'item/fileChange/patchUpdated') permissions.fileItems.set(p.itemId, p.changes);
     if (method === 'item/completed') {
@@ -191,6 +199,8 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
     const entries = [...messages.values()];
     const text = (entries.findLast(m => m.phase === 'final_answer') ?? entries.at(-1))?.text ?? '';
     const status = completion.turn.status;
+    const reportedUsage = usage as RunUsage | null; // Assigned by the notification callback.
+    if (reportedUsage && status === 'completed') saveUsage(store, run.id, token, { ...reportedUsage, status: 'reported' });
     store.appendEvent(run.id, 'result', { runtime: 'codex', status, turnId });
     if (status === 'completed') return { text: text.slice(0, 1_000_000), success: true, errorCode: null };
     if (status === 'failed') return { text: (completion.turn.error?.message ?? text).slice(0, 1_000_000), success: false, errorCode: terminalError(completion.turn.error) };

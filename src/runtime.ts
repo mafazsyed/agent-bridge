@@ -6,6 +6,7 @@ import { evaluateTool, REVIEW_TOOLS, WRITE_TOOLS } from './policy.js';
 import type { Config } from './config.js';
 import { claudeOptions } from './claude-options.js';
 import { validatePermissions, type ClaudePermissions } from './permission-options.js';
+import { claudeUsage, saveUsage } from './usage.js';
 
 // Native selections defer ordinary decisions to Claude; only Bridge's capability/path
 // boundaries may override them. The omitted setting retains the original policy.
@@ -106,6 +107,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     await ended;
   })();
   let result: SDKResultMessage | undefined;
+  let runtimeVersion: string | undefined;
   const q = open({ prompt: native ? prompt : run.prompt, options });
   // A completed native turn still needs its bounded transcript flush, even if
   // Stop or the worker deadline races the result's delivery.
@@ -158,6 +160,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
       if (event.type === 'system' && event.subtype === 'init') {
         if (event.session_id !== conversation.id) throw new BridgeError('session_identity_changed', 'Runtime returned a different conversation; refusing silent replacement.');
         store.markSessionInitialized(conversation.id);
+        runtimeVersion = event.claude_code_version;
         if (event.permissionMode !== policy.permissionMode) { noteModeMismatch(event.permissionMode); throw new BridgeError('unknown_outcome', 'Claude changed the selected permission mode after dispatch; tools are gated. Inspect the saved conversation before continuing.'); }
         store.appendEvent(run.id, 'started', { model: event.model, effortRequested: run.effort, effortApplied: event.effort ?? null, effortReported: event.effort !== undefined, sessionId: event.session_id, permissionsRequested: native ?? null, permissionModeApplied: event.permissionMode, policy: native ? 'native' : 'bridge-controlled' });
       } else if (event.type === 'system' && event.subtype === 'status' && event.permissionMode !== undefined) {
@@ -170,6 +173,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
       } else if (event.type === 'result') {
         if (event.session_id !== conversation.id) throw new BridgeError('session_identity_changed', 'Result belongs to a different conversation.');
         result = event;
+        saveUsage(store, run.id, token, claudeUsage(event, runtimeVersion));
         store.appendEvent(run.id, 'result', { subtype: event.subtype, isError: event.is_error, durationMs: event.duration_ms, permissionDenials: event.permission_denials?.length ?? 0 });
         // EOF lets the CLI flush its transcript and exit normally. Do not force-kill
         // immediately after result; resume depends on the final transcript write.
