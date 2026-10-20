@@ -4,6 +4,28 @@ Persistent local delegation between Claude Code and Codex, available to MCP clie
 
 Public preview.
 
+## How it works
+
+Codex can ask Claude to review its work. Claude can ask Codex to implement a change. Agent Bridge connects them and keeps the delegated conversations available.
+
+```mermaid
+flowchart LR
+    main["Your main agent<br/>Codex or Claude Code"]
+    bridge["Agent Bridge<br/>Background jobs<br/>Saved conversations"]
+    claude["Claude Code<br/>Your chosen model"]
+    codex["Codex<br/>Your chosen model"]
+
+    main <-->|Tasks, follow-ups and results| bridge
+    bridge <--> claude
+    bridge <--> codex
+```
+
+- **Delegate:** choose Claude Code or Codex, then the model, effort level and permissions.
+- **Keep working:** your main agent stays available while the other agent works. It checks progress, handles questions or requested approvals, and retrieves results.
+- **Keep context:** continue the same conversation or fork it to try another approach. Write tasks use separate Git worktrees.
+
+The bridge runs on your computer using your existing CLI installations and accounts.
+
 ## Setup
 
 Requirements: **Node 24+**, Git for implementation tasks, and the installed native executable for the runtime you want to delegate to (Claude Code, Codex, or both). Authenticate through the runtime itself: `claude auth login` or `codex login`. Agent Bridge does not collect credentials or provide a separate sign-in service.
