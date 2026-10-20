@@ -28,6 +28,29 @@ The bridge runs on your computer using your existing CLI installations and accou
 
 ## Setup
 
+### Set up with your agent
+
+Paste this into **Codex or Claude Code running on your computer**:
+
+```text
+Install and set up Agent Bridge for me:
+https://github.com/mafazsyed/agent-bridge
+
+Read docs/setup.md in that repository and carry out the setup. Detect my OS
+and installed Codex / Claude Code CLIs, build Agent Bridge in a permanent
+folder, register its MCP server in the installed clients, and install the
+matching delegation skills. Reuse a working installation if one already exists.
+
+Preserve my existing settings and permissions. If a prerequisite or agent CLI
+is missing, give me its official installation instructions instead of installing
+it automatically. Let me handle any sign-in. Verify the setup, then tell me
+which delegation directions are ready and whether I need to restart anything.
+```
+
+The agent handles installation and configuration; you handle any required sign-in or client approval. Both CLIs are needed for delegation between Codex and Claude Code. [Setup guide](docs/setup.md) · [Manual setup](#manual-setup)
+
+### Manual setup
+
 Requirements: **Node 24+**, Git for implementation tasks, and the installed native executable for the runtime you want to delegate to (Claude Code, Codex, or both). Authenticate through the runtime itself: `claude auth login` or `codex login`. Agent Bridge does not collect credentials or provide a separate sign-in service.
 
 Use a current native Codex CLI (this adapter is tested with **0.163.0**) for Codex delegation. Keep its bundled execution helpers beside the executable; do not copy only the main binary. Older or incompatible protocol/configuration responses fail without dispatching a prompt.
