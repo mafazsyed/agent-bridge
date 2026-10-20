@@ -4,7 +4,7 @@ import { Store } from './store.js';
 import { BridgeError, TERMINAL } from './types.js';
 import { runClaude, errorCode, resultErrorCode } from './runtime.js';
 import { runCodex } from './codex-runtime.js';
-import { prepareWorktree } from './git.js';
+import { prepareWorktree, snapshotFork } from './git.js';
 import { processIdentity, workerAlive } from './process-identity.js';
 import { appendFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,6 +18,7 @@ async function main() {
   let reason: 'cancelled' | 'timeout' | 'lease_lost' | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
   let attached = false;
+  let runtimeStarted = false;
   let abortAt: number | null = null;
   const stop = () => { reason = 'cancelled'; abort.abort(); };
   process.on('SIGTERM', stop);
@@ -44,8 +45,7 @@ async function main() {
       await delay(queueDelay());
     }
     const run = store.getRun(runId);
-    const conversation = store.getConversation(run.conversationId);
-    prepareWorktree(conversation);
+    let conversation = store.getConversation(run.conversationId);
     timer = setInterval(() => {
       try {
         if (reason) {
@@ -63,6 +63,13 @@ async function main() {
         if (reason) abort.abort();
       } catch (error) { if (!tolerateBusy(error, lastHeartbeat, settings.staleMs)) { reason = 'lease_lost'; abort.abort(); } }
     }, 1000);
+    if (conversation.fork && !conversation.sessionInitialized) {
+      store.checkForkLease(runId, token);
+      if (conversation.mode === 'write') conversation = store.recordForkSnapshot(runId, token, await snapshotFork(conversation, abort.signal));
+    }
+    await prepareWorktree(conversation, abort.signal);
+    if (abort.signal.aborted || store.getRun(runId).cancelRequested) throw new BridgeError('cancelled', 'Run stopped during workspace preparation.');
+    runtimeStarted = true;
     const result = conversation.runtime === 'codex' ? await runCodex(settings, store, run, conversation, token, abort) : await (async () => {
       const value = await runClaude(settings, store, run, conversation, token, abort);
       return { text: 'result' in value ? value.result : value.errors.join('\n'), success: !value.is_error, errorCode: resultErrorCode(value) };
@@ -76,7 +83,7 @@ async function main() {
     const code = error instanceof BridgeError ? error.code : errorCode(String(error));
     // Both runtimes use cancelled only before prompt dispatch. Native Claude
     // setup failures are also known unstarted work, even if the deadline raced.
-    const knownUnstarted = ['cancelled', 'permissions_unavailable'].includes(code);
+    const knownUnstarted = !runtimeStarted || ['cancelled', 'permissions_unavailable', 'fork_source_missing', 'fork_unsupported', 'fork_setup_failed', 'fork_identity_invalid', 'fork_native_goal_unsupported'].includes(code);
     const status = reason === 'cancelled' || (code === 'cancelled' && !reason) ? 'cancelled' : (reason && !knownUnstarted) || ['unknown_outcome', 'session_identity_changed'].includes(code) ? 'unknown' : 'failed';
     const text = error instanceof BridgeError && error.completedResult !== undefined
       ? `[Completion could not be verified: ${String(error).slice(0, 8000)}]\n\n${error.completedResult}`.slice(0, 1_000_000)

@@ -65,7 +65,7 @@ test('runtime schemas reject cross keys, unknown aliases, incomplete granular po
 
 async function runFixture(permissions: RuntimePermissions | null, work: (options: Options, f: ReturnType<typeof setup>, runId: string) => Promise<void>, override: {
   applied?: string; initMode?: string; setError?: boolean; autoSupported?: boolean; unknownModel?: boolean; hooksApplied?: boolean;
-  setupHang?: 'initialize' | 'models' | 'mode' | 'reinitialize'; cancelSetup?: boolean; drainHang?: boolean; abortDuringDrain?: boolean;
+  setupHang?: 'initialize' | 'models' | 'mode' | 'reinitialize'; cancelSetup?: boolean; drainHang?: boolean; abortDuringDrain?: boolean; failedResult?: boolean; drainError?: boolean;
 } = {}) {
   const f = setup();
   const submitted = f.bridge.start({ requestKey: randomUUID(), prompt: 'fixture', cwd: f.root });
@@ -94,9 +94,11 @@ async function runFixture(permissions: RuntimePermissions | null, work: (options
         received = true;
         yield { type: 'system', subtype: 'init', session_id: conversation.id, model: 'fixture', permissionMode: override.initMode ?? selected };
         await work(options, f, run.id);
-        yield { type: 'result', subtype: 'success', session_id: conversation.id, is_error: false, result: 'done' };
+        yield override.failedResult ? { type: 'result', subtype: 'error_max_turns', session_id: conversation.id, is_error: true, errors: ['Turn limit'] }
+          : { type: 'result', subtype: 'success', session_id: conversation.id, is_error: false, result: 'done' };
         if (override.abortDuringDrain) { abort.abort(); assert.equal(closed, false, 'Completed native turn must flush before close'); }
         if (override.drainHang) await new Promise(() => {});
+        if (override.drainError) throw new Error('Transcript flush failed');
         if (incoming) assert.equal((await incoming.next()).done, true);
         drained = true;
       },
@@ -165,6 +167,10 @@ for (const setupHang of ['initialize', 'models', 'mode', 'reinitialize'] as cons
 });
 test('a result followed by stuck transcript shutdown is uncertain and bounded', async () => {
   await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'default' }, async () => {}, { drainHang: true }), { code: 'unknown_outcome', received: true, closed: true, completedResult: 'done' });
+});
+test('a non-fork failed native turn with failed transcript shutdown is also uncertain', async () => {
+  await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'default' }, async () => {}, { failedResult: true, drainError: true }),
+    { code: 'unknown_outcome', received: true, closed: true, completedResult: 'Turn limit' });
 });
 test('a missing native hook permission mode is denied and cannot finish successfully', async () => {
   await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'default' }, async (options, f) => {

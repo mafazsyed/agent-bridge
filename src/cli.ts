@@ -20,7 +20,7 @@ async function input(): Promise<string> {
 async function main() {
   const [command, arg, extra, cursor] = process.argv.slice(2);
   if (!command || command === '--help') {
-    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models [claude|codex]    List native models and effort capabilities\n  permissions [claude|codex]  Discover native permission controls\n  limits [claude|codex]    Read current account quota without inference\n  start                   Read start_run JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor [claude|codex]    Check the native CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code or Codex. See README for permissions and recovery.');
+    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models [claude|codex]    List native models and effort capabilities\n  permissions [claude|codex]  Discover native permission controls\n  limits [claude|codex]    Read current account quota without inference\n  start                   Read start_run JSON from stdin\n  fork                    Read fork_conversation JSON from stdin\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor [claude|codex]    Check the native CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code or Codex. See README for permissions and recovery.');
     return;
   }
   const settings = config(false);
@@ -48,13 +48,14 @@ async function main() {
     console.log(JSON.stringify({ node: process.version, runtime, version, executable, stateDir: settings.stateDir, maxActive: settings.maxActive, authentication: `Not tested; use ${runtime === 'claude' ? 'claude auth login' : 'codex login'} if a task reports auth_required.` }, null, 2));
     return;
   }
-  if (['start', 'cancel', 'answer', 'prune'].includes(command)) requireTopLevel();
+  if (['start', 'fork', 'cancel', 'answer', 'prune'].includes(command)) requireTopLevel();
   const bridge = new Bridge(settings);
   if (command === 'mcp') { await serve(bridge); return; }
   try {
     let result: unknown;
     switch (command) {
       case 'start': result = bridge.start(JSON.parse(await input())); break;
+      case 'fork': result = bridge.fork(JSON.parse(await input())); break;
       case 'get': result = bridge.get(arg!, integer(extra ?? '0')); break;
       case 'wait': result = await bridge.wait(arg!, integer(cursor ?? '0'), integer(extra ?? '30')); break;
       case 'cancel': result = publicRun(bridge.store.requestCancel(arg!)); break;

@@ -57,7 +57,9 @@ Ask your MCP-enabled agent to delegate a review to Opus. It can use:
 | --- | --- |
 | `list_models` | Read the selected runtime's live model catalogue and effort capabilities |
 | `list_permission_modes` | Discover native permission controls without submitting a prompt |
+| `get_account_limits` | Read current native account quota windows without inference |
 | `start_run` | Start a job or queue a follow-up on a conversation |
+| `fork_conversation` | Branch an idle conversation into independent native history and send its first prompt |
 | `get_run` | Read status, results, pending input and progress pages |
 | `wait_run` | Wait up to 50 seconds for changes |
 | `cancel_run` | Request cancellation; poll until terminal |
@@ -181,7 +183,34 @@ Multiple conversations can use different runtimes, models, effort levels and per
 
 To change model or effort, submit the next `start_run` with the existing `conversationId` and the desired values from `list_models`. This preserves the native history and workspace. Overrides apply only to that run: an omitted value on a later turn returns to the saved conversation default. Bridge does not change models during a running turn. Switching between Claude and Codex requires a new conversation.
 
-Bridge does not yet expose conversation forking. Both runtimes have native session-fork support, but a conversation fork is not a filesystem snapshot; write-worktree handling needs an explicit policy before Bridge can offer it safely.
+Use `fork_conversation` to try a different approach without changing the original conversation:
+
+```json
+{
+  "sourceConversationId": "<saved Bridge conversation UUID>",
+  "requestKey": "alternative-approach-1",
+  "prompt": "Try the simpler approach we discussed."
+}
+```
+
+The CLI equivalent is `node dist/cli.js fork`, reading the same JSON from stdin. The result has a new `conversation.id` and `run.id`; wait for that run, then continue it with `start_run({conversationId: ...})`. `list_conversations` and run responses expose its `fork` lineage and `sessionInitialized` state.
+
+Forks use the same runtime and workspace mode. They inherit the source's **saved** model, effort and permission defaults, not a temporary override on its last run. Optional model/effort/permissions become the new fork's defaults; `permissions: null` explicitly selects Bridge's original policy. Parent settings stay unchanged. Bridge approval decisions are not copied.
+
+The source must be idle, with its latest run successful. Resolve failed or uncertain work first. While a fork is queued or copying history, parent follow-ups return `fork_in_progress`; retry the unsaved request after the fork initializes. Multiple forks may copy the same source, and after initialization parent and forks can run independently. Do not use the source concurrently through its native CLI or edit its files during the snapshot: Bridge cannot lock outside clients.
+
+| Source mode | Fork workspace |
+| --- | --- |
+| Review | Same directory, with the same review boundary; files are not frozen |
+| Write | A new worktree at the source's HEAD, with its tracked and nonignored untracked working files copied as uncommitted edits |
+
+A write snapshot uses a temporary Git index and a tree object. It does not commit, stash, reset or change the parent's index, branch or files, and needs no Git author/signing identity. Staged/unstaged distinctions are flattened in the child. Ignored files, including ignored dependency folders and environment files, are not copied. Repository filters can run and line endings follow Git configuration. Submodules, embedded repositories and agent-configuration changes since the source's original base are refused, including committed changes. For intentional configuration updates, review them and start a new conversation from the accepted base. The tree object remains in the shared Git object store until Git's normal cleanup; the fork's receipt records its identity. A worktree is not an OS security boundary: explicitly authorized broad native permissions or commands can still reach other directories.
+
+Forks retain native conversation history, not just the last answer. Claude uses its [native session fork](https://code.claude.com/docs/en/agent-sdk/sessions); Codex uses [`thread/fork`](https://learn.chatgpt.com/docs/app-server#threads) with fresh identity and verified workspace/permission settings. No fallback to a fresh empty chat is attempted. Repeating the exact request key returns its original run. If initialization fails, inspect that result before submitting a new fork with a new key; an uninitialized fork cannot be resumed. A crash between native fork creation and recording its ID can leave an unused native transcript.
+
+Claude can compact long copied history; Bridge records `fork_history_compacted` and checks that the saved child transcript is nonempty. Otherwise it checks the child message count against the source plus new messages, including when the turn fails. This is a persistence check, not proof that a compacted summary preserves every detail. Codex pins the source's last completed turn when its event is retained. After event pruning it copies the native thread's latest history instead; the `started` event exposes `forkTurnPinned: false`. Codex forks and child resumes refuse native goals set outside Bridge, including paused or completed goals: clear the goal in Codex first. This prevents additional automatic turns outside the Bridge job. Avoid using the source concurrently outside Bridge. Each runtime's own retention policy determines how long its transcript is available.
+
+This edition forks the latest completed history. Active-turn forks, earlier-message selection, cross-runtime history conversion and changing workspace mode are not exposed. Cumulative usage in a native fork may include inherited history: never add or subtract parent/fork totals to infer new spend.
 
 ## Usage and account limits
 
@@ -225,7 +254,7 @@ There is no exactly-once execution guarantee, no promise that work survives a ma
 
 The local SQLite ledger stores prompts, results, progress, permission input and workspace paths. It may contain sensitive task content. State directory and file modes are private on POSIX; Windows access depends on the user's filesystem ACLs. Point the state variable only at a dedicated directory: the bridge applies private directory permissions. The bridge adds no telemetry and does not log authentication environment values. Claude has its own data handling and authentication policies.
 
-`node dist/cli.js prune 30` removes bridge task content older than 30 days, retaining small idempotency receipts and conversation identities. It does not delete worktrees or Claude transcripts. SQLite page reclamation is not secure erasure.
+`node dist/cli.js prune 30` removes bridge task content older than 30 days, retaining small idempotency receipts, conversation identities and fork lineage. It does not delete worktrees or native transcripts. SQLite page reclamation is not secure erasure.
 
 To retire a write conversation, first confirm it has no queued, running or waiting runs, inspect its worktree and preserve or integrate any wanted changes. From the source repository, use `git worktree remove "<saved cwd>"`, then `git branch -d "<saved branch>"`. These commands refuse dirty worktrees or unmerged branches; inspect a refusal instead of forcing deletion. Do not resume a retired conversation. Its ledger record and small readiness receipt remain; automatic worktree retirement is not implemented yet.
 
@@ -239,9 +268,12 @@ AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-acceptance.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-control.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-codex.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-claude-to-codex.ts
+AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-fork.ts
 ```
 
 The runtime prototype verifies SDK → CLI → SDK continuation with the same UUID and retained context. The live acceptance script checks review restrictions, queued follow-ups, isolated edits and a specific harmless command approval. Temporary evidence is kept under ignored `.local/`.
+
+The fork script uses twelve short turns across Claude and Codex to check copied context, independent follow-ups, source preservation and worktree snapshots through stdio MCP. Set `AGENT_BRIDGE_LIVE_RUNTIME=claude` or `codex` to test only one runtime (six turns). It prints the isolated temporary evidence directory; do not commit that directory or its transcripts.
 
 See [validation](docs/validation.md) for the tested versions and coverage limits. The official Agent SDK is pinned; native Claude updates require re-running the compatibility probe. This is a source repository: npm package publication and plugin-directory submission are separate steps.
 

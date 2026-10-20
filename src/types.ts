@@ -15,6 +15,8 @@ export const QUESTION_TOOLS: readonly string[] = ['AskUserQuestion', 'codex.user
 export type RunStatus = 'queued' | 'running' | 'needs_input' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export const TERMINAL: readonly RunStatus[] = ['succeeded', 'failed', 'cancelled', 'unknown'];
 export interface Conversation {
+  // Immutable source checkpoint. Native history is copied, not the Bridge approval ledger.
+  fork?: { conversationId: string; runId: string; nativeId: string; cwd: string; branch?: string | null; sourceBaseCommit?: string | null; turnId?: string | null; snapshotTree?: string | null } | null;
   // Null/omitted preserves the original controlled-delegation behavior.
   permissions?: RuntimePermissions | null;
   id: string;
@@ -83,6 +85,16 @@ export interface StartInput {
   timeoutSeconds?: number;
   maxTurns?: number;
   acknowledgeUncertain?: boolean;
+}
+export interface ForkInput {
+  sourceConversationId: string;
+  requestKey: string;
+  prompt: string;
+  model?: string;
+  effort?: Effort;
+  permissions?: RuntimePermissions | null;
+  timeoutSeconds?: number;
+  maxTurns?: number;
 }
 export class BridgeError extends Error {
   constructor(public code: string, message: string, public completedResult?: string) { super(message); this.name = 'BridgeError'; }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -10,6 +10,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { discoverModels } from '../src/models.js';
 import { discoverAccountLimits } from '../src/limits.js';
+import { pathToFileURL } from 'node:url';
 
 // Uses the actual compiled CLI, detached worker, SDK transport and SQLite. Only inference is fake.
 execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.build.json']);
@@ -51,6 +52,42 @@ test('real stdio MCP disconnect leaves its delegated worker alive', async () => 
     await client.close();
     assert.equal((await f.getTerminal(started.run.id)).run.status, 'succeeded');
   } finally { await client.close(); await f.cleanup(); }
+});
+
+test('detached Codex fork worker snapshots files, resumes only the child and releases failed-copy reservations', async () => {
+  const f = await fixture();
+  try {
+    Object.assign(f.env, { AGENT_BRIDGE_CODEX_PATH: process.execPath });
+    const record = join(f.root, 'codex-rpc.jsonl');
+    const fixtureUrl = pathToFileURL(resolve('tests/fixtures/codex-app-server.mjs')).href;
+    // Node stands in for the native executable; app-server is its fixture script.
+    writeFileSync(join(f.root, 'app-server'), `process.argv = [process.execPath, 'fixture', 'ok', ${JSON.stringify(record)}]; await import(${JSON.stringify(fixtureUrl)});`);
+    writeFileSync(join(f.root, 'package.json'), '{"type":"module"}');
+    writeFileSync(join(f.root, '.gitignore'), 'state/\n*.jsonl\n');
+    writeFileSync(join(f.root, 'seed'), 'base');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: f.root, stdio: 'ignore' });
+    git('init', '-q'); git('add', '.');
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'fixture');
+    const source = await f.command(['start'], { requestKey: 'source', runtime: 'codex', cwd: f.root, mode: 'write', baseRef: 'HEAD', prompt: 'Seed', model: 'native-model', effort: 'low' });
+    assert.equal((await f.getTerminal(source.run.id)).run.status, 'succeeded');
+    writeFileSync(join(source.conversation.cwd, 'seed'), 'dirty parent');
+    const child = await f.command(['fork'], { requestKey: 'fork', sourceConversationId: source.conversation.id, prompt: 'Alternative' });
+    const done = await f.getTerminal(child.run.id);
+    assert.equal(done.run.status, 'succeeded', JSON.stringify(done.run));
+    assert.equal(done.conversation.nativeId, 'fork-thread');
+    assert.ok(done.conversation.fork.snapshotTree);
+    assert.equal(readFileSync(join(done.conversation.cwd, 'seed'), 'utf8'), 'dirty parent');
+    const next = await f.command(['start'], { requestKey: 'child-next', conversationId: child.conversation.id, prompt: 'Continue' });
+    assert.equal((await f.getTerminal(next.run.id)).run.status, 'succeeded');
+    const rpc = readFileSync(record, 'utf8').trim().split('\n').map(s => JSON.parse(s));
+    assert.deepEqual(rpc.filter(r => r.method === 'turn/start').map(r => r.params.threadId), ['native-thread', 'fork-thread', 'fork-thread']);
+    mkdirSync(join(source.conversation.cwd, '.codex')); writeFileSync(join(source.conversation.cwd, '.codex', 'config.toml'), 'fixture=true');
+    const unsafe = await f.command(['fork'], { requestKey: 'unsafe-copy', sourceConversationId: source.conversation.id, prompt: 'Must not run' });
+    const failed = await f.getTerminal(unsafe.run.id);
+    assert.equal(failed.run.status, 'failed'); assert.equal(failed.run.errorCode, 'fork_source_agent_config_changed');
+    const parentNext = await f.command(['start'], { requestKey: 'source-next', conversationId: source.conversation.id, prompt: 'Continue' });
+    assert.equal((await f.getTerminal(parentNext.run.id)).run.status, 'succeeded', 'Failed preparation releases the parent');
+  } finally { await f.cleanup(); }
 });
 
 test('CLI and real MCP model discovery use runtime metadata without a run or inference prompt', async () => {

@@ -1,4 +1,4 @@
-import { query, type Options, type SDKResultMessage, type PermissionResult, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages, type Options, type SDKResultMessage, type PermissionResult, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from './store.js';
 import { BridgeError, type Conversation, type Run } from './types.js';
@@ -36,9 +36,18 @@ export function resultErrorCode(result: SDKResultMessage): string | null {
   return errorCode('result' in result ? result.result : result.errors.join('\n'));
 }
 export async function runClaude(settings: Config, store: Store, run: Run, conversation: Conversation, token: string, abort: AbortController, open = query,
-  timing = { setupMs: 30_000, drainMs: 10_000 }) {
+  timing = { setupMs: 30_000, drainMs: 10_000 }, sessionMessages = getSessionMessages) {
   validatePermissions(run.permissions, 'claude', conversation.mode);
+  const fork = !conversation.sessionInitialized ? conversation.fork : null;
+  let sourceMessageCount = 0;
+  if (fork) {
+    store.checkForkLease(run.id, token);
+    try { sourceMessageCount = (await sessionMessages(fork.nativeId, { dir: fork.cwd })).length; }
+    catch { throw new BridgeError('fork_source_missing', 'The source Claude transcript could not be read. Inspect its availability before trying a new fork. No prompt was sent.'); }
+    if (!sourceMessageCount) throw new BridgeError('fork_source_missing', 'The source Claude transcript is missing or empty. No prompt was sent.');
+  }
   const native = run.permissions as ClaudePermissions | null | undefined;
+  const streamed = Boolean(native || fork);
   const policy = claudePermissionPolicy(conversation, native);
   let modeMismatch = false;
   const noteModeMismatch = (applied: unknown) => {
@@ -71,7 +80,8 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
   };
   const options: Options = {
     ...claudeOptions(settings), cwd: conversation.cwd, model: run.model, effort: run.effort as Options['effort'],
-    ...(conversation.sessionInitialized ? { resume: conversation.id } : { sessionId: conversation.id }),
+    ...(fork ? { resume: fork.nativeId, forkSession: true, sessionId: conversation.id }
+      : conversation.sessionInitialized ? { resume: conversation.id } : { sessionId: conversation.id }),
     abortController: abort, tools: policy.tools, allowedTools: policy.allowedTools,
     permissionMode: policy.permissionMode,
     ...(native?.permissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
@@ -96,6 +106,9 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
       return ask(tool, input, context.signal, context.decisionReason);
     },
   };
+  if (conversation.fork && conversation.fork.cwd !== conversation.cwd && typeof options.systemPrompt === 'object' && options.systemPrompt && 'type' in options.systemPrompt && options.systemPrompt.type === 'preset') {
+    options.systemPrompt.append += ` This conversation was forked. Earlier messages reference ${JSON.stringify(conversation.fork.cwd)}; do not read or modify that parent workspace. The assigned workspace contains a snapshot of its nonignored working files.`;
+  }
   let dispatch!: () => void; let endInput!: () => void;
   const gate = new Promise<void>(resolve => { dispatch = resolve; });
   const ended = new Promise<void>(resolve => { endInput = resolve; });
@@ -107,36 +120,39 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     await ended;
   })();
   let result: SDKResultMessage | undefined;
+  let forkCompacted = false;
   let runtimeVersion: string | undefined;
-  const q = open({ prompt: native ? prompt : run.prompt, options });
+  if (abort.signal.aborted || store.getRun(run.id).cancelRequested) throw new BridgeError('cancelled', 'Run stopped before startup.');
+  const q = open({ prompt: streamed ? prompt : run.prompt, options });
   // A completed native turn still needs its bounded transcript flush, even if
   // Stop or the worker deadline races the result's delivery.
-  const closeOnAbort = () => { if (!native || !result) q.close(); };
+  const closeOnAbort = () => { if (!streamed || !result) q.close(); };
   abort.signal.addEventListener('abort', closeOnAbort, { once: true });
   if (abort.signal.aborted) closeOnAbort();
-  let dispatched = !native;
+  let dispatched = !streamed;
   let drainDeadline: number | undefined;
   try {
-    if (native) {
+    if (streamed) {
       let setupTimer: ReturnType<typeof setTimeout> | undefined;
       let cancelSetup!: () => void;
       const stopped = new Promise<never>((_, reject) => {
         cancelSetup = () => reject(new BridgeError('cancelled', 'Run stopped before dispatch.'));
         abort.signal.addEventListener('abort', cancelSetup, { once: true });
         if (abort.signal.aborted) cancelSetup();
-        setupTimer = setTimeout(() => reject(new BridgeError('permissions_unavailable', 'Claude permission setup timed out. No prompt was sent.')), timing.setupMs);
+        setupTimer = setTimeout(() => reject(new BridgeError(fork && !native ? 'fork_setup_failed' : 'permissions_unavailable',
+          fork && !native ? 'Claude fork setup timed out. No prompt was sent.' : 'Claude permission setup timed out. No prompt was sent.')), timing.setupMs);
       });
       try {
         await Promise.race([(async () => {
           await q.initializationResult();
-          if (native.permissionMode === 'auto') {
+          if (native?.permissionMode === 'auto') {
             const models = await q.supportedModels();
             const selected = models.find(m => m.value === run.model || m.resolvedModel === run.model);
             if (!selected || selected.supportsAutoMode === false) throw new BridgeError('permissions_unavailable', 'This Claude model is absent from the catalogue or reports that auto permission mode is unavailable. Use list_models. No prompt was sent.');
           }
-          await q.setPermissionMode(native.permissionMode);
+          await q.setPermissionMode(policy.permissionMode);
           const initialized = await q.reinitialize();
-          verifyClaudePermissionMode(initialized, native.permissionMode);
+          verifyClaudePermissionMode(initialized, policy.permissionMode);
           if (initialized.hooks_applied === false) throw new BridgeError('permissions_unavailable', 'Claude did not apply the Bridge hooks. No prompt was sent.');
         })(), stopped]);
       } finally { clearTimeout(setupTimer); abort.signal.removeEventListener('abort', cancelSetup); }
@@ -159,10 +175,14 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
       const event = item.value;
       if (event.type === 'system' && event.subtype === 'init') {
         if (event.session_id !== conversation.id) throw new BridgeError('session_identity_changed', 'Runtime returned a different conversation; refusing silent replacement.');
-        store.markSessionInitialized(conversation.id);
+        try { store.markSessionInitialized(conversation.id, run.id, token); }
+        catch (error) { throw new BridgeError('unknown_outcome', `Claude started but Bridge could not record its session: ${String(error).slice(0, 2000)}. Inspect the saved conversation before continuing.`); }
         runtimeVersion = event.claude_code_version;
         if (event.permissionMode !== policy.permissionMode) { noteModeMismatch(event.permissionMode); throw new BridgeError('unknown_outcome', 'Claude changed the selected permission mode after dispatch; tools are gated. Inspect the saved conversation before continuing.'); }
         store.appendEvent(run.id, 'started', { model: event.model, effortRequested: run.effort, effortApplied: event.effort ?? null, effortReported: event.effort !== undefined, sessionId: event.session_id, permissionsRequested: native ?? null, permissionModeApplied: event.permissionMode, policy: native ? 'native' : 'bridge-controlled' });
+      } else if (event.type === 'system' && event.subtype === 'compact_boundary' && fork) {
+        forkCompacted = true;
+        store.appendEvent(run.id, 'warning', { code: 'fork_history_compacted', message: 'Claude compacted the copied conversation. The child retains its compacted context rather than every original message.' });
       } else if (event.type === 'system' && event.subtype === 'status' && event.permissionMode !== undefined) {
         store.appendEvent(run.id, 'permission_mode', { applied: event.permissionMode });
         if (event.permissionMode !== policy.permissionMode) { noteModeMismatch(event.permissionMode); throw new BridgeError('unknown_outcome', 'Claude changed permission mode during the turn; further tools are refused.'); }
@@ -177,17 +197,26 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
         store.appendEvent(run.id, 'result', { subtype: event.subtype, isError: event.is_error, durationMs: event.duration_ms, permissionDenials: event.permission_denials?.length ?? 0 });
         // EOF lets the CLI flush its transcript and exit normally. Do not force-kill
         // immediately after result; resume depends on the final transcript write.
-        if (native) { endInput(); drainDeadline ??= Date.now() + timing.drainMs; }
+        if (streamed) { endInput(); drainDeadline ??= Date.now() + timing.drainMs; }
       }
     }
   } catch (error) {
     const completedText = result ? ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000) : undefined;
     if (error instanceof BridgeError) { if (completedText !== undefined) error.completedResult = completedText; throw error; }
-    if (!dispatched) throw new BridgeError('permissions_unavailable', `Claude could not apply the selected permissions before dispatch: ${String(error).slice(0, 2000)}`);
-    if (native && result && !result.is_error) throw new BridgeError('unknown_outcome', 'Claude returned a result but its session shutdown failed. Inspect the saved transcript before continuing.', completedText);
+    if (!dispatched) throw new BridgeError(fork && !native ? 'fork_setup_failed' : 'permissions_unavailable',
+      `${fork && !native ? 'Claude could not prepare the fork' : 'Claude could not apply the selected permissions'} before dispatch: ${String(error).slice(0, 2000)}`);
+    if (streamed && result) throw new BridgeError('unknown_outcome', 'Claude returned a result but its session shutdown failed. Inspect the saved transcript before continuing.', completedText);
     if (!result) throw new BridgeError('unknown_outcome', `Runtime ended without a trustworthy completion: ${String(error).slice(0, 2000)}`);
   } finally { dispatch(); endInput(); abort.signal.removeEventListener('abort', closeOnAbort); q.close(); }
   if (modeMismatch) throw new BridgeError('unknown_outcome', 'Claude reported a different permission mode in a tool hook. Inspect the saved conversation before continuing.', result && ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000));
   if (!result) throw new BridgeError('unknown_outcome', 'Runtime exited without a terminal result. Inspect the saved conversation before retrying.');
+  if (fork) {
+    try {
+      const messages = await sessionMessages(conversation.id, { dir: conversation.cwd });
+      if (forkCompacted ? messages.length === 0 : messages.length <= sourceMessageCount) throw new Error('Source history not retained');
+    } catch {
+      throw new BridgeError('unknown_outcome', 'The fork transcript did not retain the expected source history or could not be read. Inspect it before continuing.', 'result' in result ? result.result : result.errors.join('\n'));
+    }
+  }
   return result;
 }

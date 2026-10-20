@@ -149,6 +149,30 @@ Opus 5.5/high reviewed the design, implementation and fixes through Agent Bridge
 
 After building, repeat the native usage checks with `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-usage.ts`. This consumes four short model turns and writes an isolated temporary evidence file. Detailed test logs and private state remain outside committed source.
 
+## Conversation forks (2026-10-20)
+
+| Final check | macOS | Ubuntu | Windows |
+| --- | --- | --- | --- |
+| Automated suite | 172 passed | 172 passed | 171 passed; POSIX trailing-space case skipped |
+| Typecheck and build | Passed | Passed | Passed |
+| Real Claude review and write forks through stdio MCP | Passed | Passed | Passed |
+| Real Codex review and write forks through stdio MCP | Passed | Passed | Passed |
+| Codex goal preflight before fork and fresh-process child resume | Passed | Passed | Passed |
+
+Native acceptance used the installed runtime and Node versions recorded above: Claude Sonnet selected from its catalogue, Codex's configured default model, and reported low effort support. Each runtime used six short turns per host: source, write fork, child follow-up, parent follow-up, review source and review fork. Independent checks confirmed that the child remembered the parent's random marker, retained its own additional marker, wrote only inside its own worktree, and inherited tracked and untracked uncommitted files. The parent's native transcript was unchanged by the fork, and the parent follow-up did not know the child's marker. Repeating the fork request returned the original run. Claude's native cross-worktree copy and resume worked on all three hosts.
+
+The full live script passed twice on all three hosts during implementation. After the final Codex goal preflight was added, the six-turn Codex section passed again on each host. Every Bridge turn opens a new native runtime process, so these checks confirm that `thread/goal/get` works before loading the source or child. Existing Claude live evidence covers its unchanged successful native fork path; the final precheck error mapping is covered by the automated suite. Effort was requested using native catalogue metadata, not independently measured.
+
+Schema v5 adds nullable fork lineage and preserves prior submission receipts. Regression coverage includes source checkpoint transactions, duplicate requests, source reservation and release, multiple forks, child serialization, launch failure and stale-worker recovery. Git checks cover staged/unstaged/deleted/untracked/ignored files, preserving parent index bytes and HEAD, submodules and embedded repositories, agent-configuration changes both committed and uncommitted, inherited Git environment interference, detached HEAD, cancelled preparation and temporary-index cleanup. An 8,100-file fixture exceeds one MiB in both listings and line-ending warnings, with `autocrlf=true` and `safecrlf=warn`; output is streamed without changing that policy.
+
+Protocol tests cover Codex fork identity, unsupported/missing sources, pinned versus pruned turn IDs, workspace roots on fork and resume, and refusing externally assigned goals before opening history. Claude tests cover identity, missing/unreadable history, compaction, failed-turn persistence, pre-dispatch setup failures, post-dispatch initialization uncertainty, source locking and plan-mode selection. A detached Codex fixture worker exercises snapshot preparation, fork, follow-up, failure mapping and reservation release. Real Claude detached-worker coverage comes from the native acceptance script rather than a fake transcript writer.
+
+Opus 5.5/high reviewed the design, implementation and two rounds of corrections. Findings about repository-size limits, compaction, error-state persistence, line-ending warnings and committed configuration changes were fixed with regressions. Its final read-only review found no blockers, conditional on the native unloaded-thread goal check; that check subsequently passed on all three hosts.
+
+Limits specific to this feature: idle successful sources only; no active-turn/earlier-message fork, runtime conversion or workspace-mode change. Compacted history is checked for persistence, not semantic completeness. Repository filters and LFS were not exercised in live acceptance, and there is no dedicated cancellation injection during the streaming listing itself. Git line-ending conversion can change file bytes while preserving Git content. Native transcript retention and concurrent native clients remain outside Bridge's control. Goals set outside Bridge, including paused or completed goals, must be cleared before using a Codex fork. A timeout racing a refusal may still produce an uncertain status requiring inspection.
+
+Repeat with `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-fork.ts` after building (twelve short native turns), or set `AGENT_BRIDGE_LIVE_RUNTIME` to one runtime (six turns). Private evidence and transcripts remain outside committed source.
+
 ## Limits
 
 - Native acceptance covers the specific Mac, Windows and Linux configurations and models described above. It does not establish compatibility with every shell, operating-system version, model or enterprise policy.

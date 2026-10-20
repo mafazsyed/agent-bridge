@@ -2,7 +2,7 @@ import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 const [scenario, record] = process.argv.slice(2);
-const threadId = 'native-thread'; const turnId = 'native-turn';
+let threadId = 'native-thread'; const turnId = 'native-turn';
 let next = 1000; const requests = new Map();
 const send = m => process.stdout.write(JSON.stringify(m) + '\n');
 const notify = (method, params) => send({ method, params });
@@ -26,10 +26,19 @@ createInterface({ input: process.stdin }).on('line', async line => {
       skills: { bundled: { enabled: false }, include_instructions: false }, web_search: 'disabled',
       mcp_servers: { 'bridge.with.dot': { command: 'must-not-start' } } } }); break;
     case 'model/list': reply(m, { data: m.params.cursor ? [] : [model], nextCursor: m.params.cursor ? null : 'page2' }); break;
-    case 'thread/start': case 'thread/resume': {
+    case 'thread/goal/get': {
+      if (scenario === 'goal-unsupported') { send({ id: m.id, error: { code: -32601, message: 'unsupported method' } }); break; }
+      reply(m, { goal: scenario === 'goal-active' ? { threadId: m.params.threadId, status: 'active' } : null }); break;
+    }
+    case 'thread/start': case 'thread/resume': case 'thread/fork': {
+      if (m.method === 'thread/fork') {
+        if (scenario === 'fork-unsupported' || scenario === 'fork-missing') { send({ id: m.id, error: { code: scenario === 'fork-unsupported' ? -32601 : -32602, message: scenario === 'fork-missing' ? 'thread not found' : 'unsupported method' } }); break; }
+        threadId = scenario === 'fork-same-id' ? m.params.threadId : 'fork-thread';
+      } else if (m.method === 'thread/resume') threadId = m.params.threadId;
       if (scenario === 'before-dispatch-crash') { process.exit(1); break; }
       const write = m.params.sandbox === 'workspace-write';
       reply(m, { thread: { id: scenario === 'wrong-resume' ? 'other-thread' : threadId }, model: m.params.model,
+        runtimeWorkspaceRoots: scenario === 'fork-roots' ? ['/wrong'] : m.params.runtimeWorkspaceRoots ?? [],
         reasoningEffort: m.params.config.model_reasoning_effort, cwd: m.params.cwd, approvalPolicy: scenario === 'policy-downgrade' ? 'never' : m.params.approvalPolicy, approvalsReviewer: scenario === 'reviewer-downgrade' ? 'user' : m.params.approvalsReviewer,
         sandbox: scenario === 'unsafe' || m.params.sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' } : write ? { type: 'workspaceWrite', writableRoots: [m.params.cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } : { type: 'readOnly', networkAccess: false } }); break;
     }

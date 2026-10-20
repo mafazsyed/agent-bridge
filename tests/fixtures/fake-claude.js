@@ -5,7 +5,7 @@ import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 const args = process.argv.slice(2);
 const value = flag => args.find(arg => arg.startsWith(flag + '='))?.slice(flag.length + 1) ?? (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
-const session = value('--resume') || value('--session-id') || randomUUID();
+const session = (args.includes('--fork-session') ? value('--session-id') : value('--resume')) || value('--session-id') || randomUUID();
 const model = value('--model');
 let permissionMode = value('--permission-mode') ?? 'default';
 let resultSent = false, inputEnded = false, flushOnEof = false;

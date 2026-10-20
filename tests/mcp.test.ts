@@ -17,7 +17,7 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
   try {
     await server.connect(b); await client.connect(a);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'get_account_limits', 'get_run', 'list_conversations', 'list_models', 'list_permission_modes', 'list_runs', 'start_run', 'wait_run']);
+    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'fork_conversation', 'get_account_limits', 'get_run', 'list_conversations', 'list_models', 'list_permission_modes', 'list_runs', 'start_run', 'wait_run']);
     const start = await client.callTool({ name: 'start_run', arguments: { requestKey: 'mcp-fixture', prompt: 'Review', cwd: root } });
     assert.equal(start.isError, undefined);
     const payload = (start.structuredContent as any).result;
@@ -54,5 +54,16 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
     assert.deepEqual(bridge.store.consumePermission(permission.id, 'fixture')?.answers, { 'Which colour?': 'Blue' });
     await client.callTool({ name: 'cancel_run', arguments: { runId: payload.run.id } });
     assert.equal(bridge.store.getRun(payload.run.id).cancelRequested, true);
+    bridge.store.markSessionInitialized(payload.conversation.id);
+    bridge.store.finishRun(payload.run.id, 'fixture', 'succeeded', 'Completed before cancellation arrived');
+    const forkInput = { sourceConversationId: payload.conversation.id, requestKey: 'fork-mcp', prompt: 'Alternative' };
+    const fork = await client.callTool({ name: 'fork_conversation', arguments: forkInput });
+    assert.equal(fork.isError, undefined);
+    const forked = (fork.structuredContent as any).result;
+    assert.notEqual(forked.conversation.id, payload.conversation.id);
+    assert.equal(forked.conversation.fork.conversationId, payload.conversation.id);
+    const duplicate = await client.callTool({ name: 'fork_conversation', arguments: forkInput });
+    assert.equal((duplicate.structuredContent as any).result.run.id, forked.run.id);
+    assert.equal((await client.callTool({ name: 'fork_conversation', arguments: { ...forkInput, cwd: root } })).isError, true);
   } finally { await client.close(); await server.close(); bridge.close(); rmSync(root, { recursive: true, force: true }); }
 });

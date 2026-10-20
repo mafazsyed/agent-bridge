@@ -5,10 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { Store } from './store.js';
-import { BridgeError, CLAUDE_EFFORTS, NATIVE_DEFAULT, RUNTIMES, TERMINAL, isClaudeEffort, type Conversation, type Run, type Runtime, type StartInput } from './types.js';
+import { Store, type CreateRunInput } from './store.js';
+import { BridgeError, CLAUDE_EFFORTS, NATIVE_DEFAULT, RUNTIMES, TERMINAL, isClaudeEffort, type Conversation, type Run, type Runtime, type StartInput, type ForkInput } from './types.js';
 import type { Config } from './config.js';
-import { resolveBase } from './git.js';
+import { resolveBase, forkBase } from './git.js';
 import { workerAlive } from './process-identity.js';
 import { runtimePermissionsSchema, validatePermissions } from './permission-options.js';
 
@@ -23,6 +23,9 @@ export const startSchema = z.object({
   acknowledgeUncertain: z.boolean().optional(), runtime: z.enum(RUNTIMES).optional(),
   permissions: runtimePermissionsSchema.nullable().optional(),
 }).strict();
+export const forkSchema = startSchema.pick({
+  requestKey: true, prompt: true, model: true, effort: true, permissions: true, timeoutSeconds: true, maxTurns: true,
+}).extend({ sourceConversationId: z.string().uuid() }).strict();
 const DEFAULT_MAX_TURNS = 30;
 const executableFor = (settings: Config, runtime: Runtime) => runtime === 'codex' ? settings.codexExecutable : settings.executable;
 // A delegated runtime sets this for its children, so a delegated agent cannot fan out further delegations.
@@ -108,13 +111,49 @@ export class Bridge {
       };
     }
     // Codex ignores maxTurns; the stored default only satisfies the ledger column.
-    const created = this.store.createRun({
+    return this.submit({
       conversation, requestKey: input.requestKey, fingerprint, prompt: input.prompt,
       model: input.model ?? conversation.model, effort: input.effort ?? conversation.effort,
       permissions,
       timeoutMs: (input.timeoutSeconds ?? 1800) * 1000, maxTurns: input.maxTurns ?? DEFAULT_MAX_TURNS,
       acknowledgeUncertain: input.acknowledgeUncertain,
     });
+  }
+  fork(raw: ForkInput) {
+    const input = forkSchema.parse(raw);
+    requireTopLevel();
+    this.reconcile();
+    // Separate operation namespace, while preserving all existing start fingerprints.
+    const fingerprint = createHash('sha256').update(`fork:${JSON.stringify(input)}`).digest('hex');
+    const prior = this.store.findByRequestKey(input.requestKey);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw new BridgeError('idempotency_conflict', 'This requestKey already belongs to different input.');
+      return { run: publicRun(prior), conversation: this.store.getConversation(prior.conversationId), created: false };
+    }
+    const { conversation: source, run: checkpoint } = this.store.forkSource(input.sourceConversationId);
+    const permissions = input.permissions === undefined ? source.permissions ?? null : input.permissions;
+    validatePermissions(permissions, source.runtime, source.mode);
+    if (!executableFor(this.settings, source.runtime)) throw new BridgeError('cli_missing', `Install and sign in to the native ${source.runtime} CLI before forking.`);
+    if (source.runtime === 'claude' && input.effort !== undefined && !isClaudeEffort(input.effort)) throw new BridgeError('invalid_effort', `Claude effort must be one of ${CLAUDE_EFFORTS.join(', ')}.`);
+    if (source.runtime === 'codex' && input.maxTurns !== undefined) throw new BridgeError('unsupported_option', 'maxTurns is not supported for Codex; use timeoutSeconds.');
+    const id = randomUUID();
+    const base = source.mode === 'write' ? forkBase(source.cwd, undefined, source.branch) : null;
+    const conversation: Conversation = {
+      ...source, id, nativeId: null, sessionInitialized: false, createdAt: Date.now(),
+      fork: { conversationId: source.id, runId: checkpoint.id, nativeId: source.nativeId ?? source.id, cwd: source.cwd, branch: source.branch,
+        sourceBaseCommit: source.fork?.sourceBaseCommit ?? source.baseCommit, turnId: this.store.nativeTurnId(checkpoint.id) },
+      permissions, model: input.model ?? source.model, effort: input.effort ?? source.effort,
+      cwd: base ? join(realpathSync.native(this.settings.stateDir), 'worktrees', id) : source.cwd,
+      sourceCwd: source.sourceCwd, baseCommit: base?.commit ?? null, branch: base ? `agent-bridge/${id}` : null,
+    };
+    return this.submit({
+      conversation, requestKey: input.requestKey, fingerprint, prompt: input.prompt,
+      model: conversation.model, effort: conversation.effort, permissions,
+      timeoutMs: (input.timeoutSeconds ?? 1800) * 1000, maxTurns: input.maxTurns ?? DEFAULT_MAX_TURNS,
+    });
+  }
+  private submit(input: CreateRunInput) {
+    const created = this.store.createRun(input);
     if (created.created) {
       const token = randomUUID();
       try {

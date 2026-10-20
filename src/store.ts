@@ -25,7 +25,7 @@ type Param = string | number | null;
 
 const ACTIVE = `status IN ('queued', 'running', 'needs_input')`;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const RUNTIME_COLUMN = `runtime TEXT NOT NULL DEFAULT 'claude' CHECK (runtime IN ('claude', 'codex'))`;
 
 // Private columns: ord gives deterministic insertion order, ack_unknown_through is the highest unknown
@@ -99,6 +99,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS permissions_one_pending ON permissions(run_id)
 `;
 
 const toConversation = (r: Row): Conversation => ({
+  fork: r.fork_json == null ? null : JSON.parse(r.fork_json as string),
   permissions: r.permissions_json == null ? null : runtimePermissionsSchema.parse(JSON.parse(r.permissions_json as string)),
   id: r.id as string,
   runtime: r.runtime as Conversation['runtime'],
@@ -191,6 +192,8 @@ export class Store {
       if (!conversationColumns.some(c => c.name === 'runtime')) this.db.exec(`ALTER TABLE conversations ADD COLUMN ${RUNTIME_COLUMN}`);
       if (!conversationColumns.some(c => c.name === 'native_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN native_id TEXT');
       if (!conversationColumns.some(c => c.name === 'permissions_json')) this.db.exec('ALTER TABLE conversations ADD COLUMN permissions_json TEXT');
+      if (!conversationColumns.some(c => c.name === 'fork_json')) this.db.exec('ALTER TABLE conversations ADD COLUMN fork_json TEXT');
+      this.db.exec("CREATE INDEX IF NOT EXISTS conversations_fork_source ON conversations(json_extract(fork_json, '$.conversationId'))");
       this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS conversations_native ON conversations(runtime, native_id)');
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     });
@@ -225,6 +228,12 @@ export class Store {
       const c = input.conversation;
       let ackThrough: number | null = null;
       if (this.one('SELECT 1 FROM conversations WHERE id = ?', c.id)) {
+        const saved = this.getConversation(c.id);
+        if (saved.fork && !saved.sessionInitialized) throw new BridgeError('fork_not_ready', 'The fork has not bound its native history. Wait for its first run; if setup failed, inspect it and submit a new fork.');
+        if (this.one(`SELECT 1 FROM conversations c JOIN runs r ON r.conversation_id = c.id
+          WHERE json_extract(c.fork_json, '$.conversationId') = ? AND c.session_initialized = 0 AND r.${ACTIVE}`, c.id)) {
+          throw new BridgeError('fork_in_progress', 'A fork is still copying this conversation. Wait for it to initialize or finish before continuing the source.');
+        }
         const unacknowledged = this.one(
           `SELECT MAX(u.ord) AS ord FROM runs u WHERE u.conversation_id = ? AND u.status = 'unknown'
              AND NOT EXISTS (SELECT 1 FROM runs a WHERE a.conversation_id = u.conversation_id AND a.ack_unknown_through >= u.ord)`,
@@ -237,10 +246,11 @@ export class Store {
           ackThrough = unacknowledged;
         }
       } else {
+        if (c.fork) this.assertForkCheckpoint(c);
         this.run(
-          `INSERT INTO conversations (id, runtime, native_id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at, permissions_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          c.id, c.runtime, c.nativeId, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt, c.permissions ? JSON.stringify(c.permissions) : null,
+          `INSERT INTO conversations (id, runtime, native_id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at, permissions_json, fork_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          c.id, c.runtime, c.nativeId, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt, c.permissions ? JSON.stringify(c.permissions) : null, c.fork ? JSON.stringify(c.fork) : null,
         );
       }
       const id = randomUUID();
@@ -270,6 +280,55 @@ export class Store {
     const r = this.one('SELECT * FROM conversations WHERE id = ?', id);
     if (!r) throw new BridgeError('not_found', `Conversation ${id} not found`);
     return toConversation(r);
+  }
+
+  forkSource(id: string): { conversation: Conversation; run: Run } {
+    return this.tx(() => this.forkSourceInside(id));
+  }
+  nativeTurnId(runId: string): string | null {
+    const result = this.one("SELECT data FROM events WHERE run_id = ? AND type = 'result' ORDER BY seq DESC LIMIT 1", runId);
+    const id = result ? JSON.parse(result.data as string).turnId : null;
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  }
+
+  private forkSourceInside(id: string): { conversation: Conversation; run: Run } {
+    const conversation = this.getConversation(id);
+    if (this.one(`SELECT 1 FROM runs WHERE conversation_id = ? AND ${ACTIVE}`, id)) throw new BridgeError('fork_source_busy', 'Wait for all source runs to finish before forking.');
+    const latest = this.one('SELECT * FROM runs WHERE conversation_id = ? ORDER BY ord DESC LIMIT 1', id);
+    if (!conversation.sessionInitialized || !latest || latest.status !== 'succeeded') {
+      throw new BridgeError('fork_source_not_ready', 'Forking requires a saved source whose latest run succeeded. Resolve interrupted or failed work in that conversation first.');
+    }
+    return { conversation, run: toRun(latest) };
+  }
+
+  private assertForkCheckpoint(child: Conversation) {
+    const checkpoint = child.fork!;
+    const source = this.forkSourceInside(checkpoint.conversationId);
+    if (source.run.id !== checkpoint.runId || source.conversation.runtime !== child.runtime ||
+        (source.conversation.nativeId ?? source.conversation.id) !== checkpoint.nativeId || source.conversation.cwd !== checkpoint.cwd) {
+      throw new BridgeError('fork_source_changed', 'The source changed before its history could be forked. Submit a new fork.');
+    }
+  }
+
+  checkForkLease(runId: string, token: string): void {
+    this.tx(() => {
+      const run = this.getRun(runId);
+      if (run.workerToken !== token || run.status !== 'running' || run.cancelRequested) throw new BridgeError('cancelled', 'Fork no longer owns an uncancelled active run.');
+      const child = this.getConversation(run.conversationId);
+      if (child.fork && !child.sessionInitialized) this.assertForkCheckpoint(child);
+    });
+  }
+
+  recordForkSnapshot(runId: string, token: string, snapshotTree: string): Conversation {
+    if (!/^[a-f0-9]{40,64}$/.test(snapshotTree)) throw new BridgeError('invalid_argument', 'Invalid snapshot tree.');
+    return this.tx(() => {
+      const run = this.getRun(runId), child = this.getConversation(run.conversationId);
+      if (run.workerToken !== token || run.status !== 'running' || run.cancelRequested) throw new BridgeError('cancelled', 'Fork no longer owns its active run.');
+      if (!child.fork || child.sessionInitialized || child.fork.snapshotTree) throw new BridgeError('invalid_state', 'Fork snapshot is already fixed or not applicable.');
+      this.assertForkCheckpoint(child);
+      this.run('UPDATE conversations SET fork_json = ? WHERE id = ?', JSON.stringify({ ...child.fork, snapshotTree }), child.id);
+      return this.getConversation(child.id);
+    });
   }
 
   listRuns(limit = 30): Run[] {
@@ -334,10 +393,17 @@ export class Store {
     });
   }
 
-  markSessionInitialized(conversationId: string): void {
-    if (this.run('UPDATE conversations SET session_initialized = 1 WHERE id = ?', conversationId) === 0) {
-      throw new BridgeError('not_found', `Conversation ${conversationId} not found`);
-    }
+  markSessionInitialized(conversationId: string, runId?: string, token?: string): void {
+    this.tx(() => {
+      const child = this.getConversation(conversationId);
+      if (child.fork) {
+        if (!runId || !token) throw new BridgeError('lease_lost', 'Fork initialization requires its owning run.');
+        const run = this.getRun(runId);
+        if (run.conversationId !== conversationId || run.workerToken !== token || !['running', 'needs_input'].includes(run.status)) throw new BridgeError('lease_lost', 'Fork initialization requires its owning active run.');
+        if (!child.sessionInitialized) this.assertForkCheckpoint(child);
+      }
+      this.run('UPDATE conversations SET session_initialized = 1 WHERE id = ?', conversationId);
+    });
   }
 
   // Compare-and-swap the conversation's native session identity, fenced by the run lease. Rebinding the

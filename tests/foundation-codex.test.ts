@@ -125,7 +125,7 @@ test('a version 1 ledger migrates in place, keeps Claude identity and accepts ex
 
   const db = new DatabaseSync(join(dir, 'bridge.sqlite'));
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 5);
     assert.match(String(db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'conversations_native'`).get()?.sql), /UNIQUE INDEX .*\(runtime, native_id\)/);
     assert.throws(() => db.prepare(`UPDATE conversations SET runtime = 'other'`).run(), /CHECK constraint/);
   } finally { db.close(); }
@@ -141,7 +141,7 @@ test('a version 1 ledger migrates in place, keeps Claude identity and accepts ex
   } finally { bridge.close(); }
 
   const newer = new DatabaseSync(join(dir, 'bridge.sqlite'));
-  newer.exec('PRAGMA user_version = 5');
+  newer.exec('PRAGMA user_version = 6');
   newer.close();
   assert.throws(() => new Store(dir), code('schema_too_new'));
 });
