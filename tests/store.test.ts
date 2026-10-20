@@ -55,17 +55,18 @@ test('FIFO follows insertion order even when the wall clock moves backwards', ()
   } finally { store.close(); }
 });
 
-test('unlimited admits more than four conversations but still serializes each conversation', async () => {
+test('default and explicit unlimited admit independent workers but still serialize each conversation', async () => {
   const dir = stateDir(), store = new Store(dir);
   try {
     const c = conversation();
     const first = queue(store, c), second = queue(store, c);
     const jobs = [first, ...Array.from({ length: 5 }, () => queue(store, conversation()))];
-    const claims = await Promise.all(jobs.map(job => child(dir, `out = store.claimRun(args[0], args[1], 'unlimited')`, job.id, job.token)));
+    const claims = await Promise.all(jobs.map((job, index) => child(dir,
+      index % 2 ? `out = store.claimRun(args[0], args[1], 'unlimited')` : 'out = store.claimRun(args[0], args[1])', job.id, job.token)));
     assert.deepEqual(claims, [true, true, true, true, true, true]);
-    assert.equal(store.claimRun(second.id, second.token, 'unlimited'), false);
+    assert.equal(store.claimRun(second.id, second.token), false);
     store.finishRun(first.id, first.token, 'succeeded');
-    assert.equal(store.claimRun(second.id, second.token, 'unlimited'), true);
+    assert.equal(store.claimRun(second.id, second.token), true);
     const extra = queue(store, conversation());
     assert.equal(store.claimRun(extra.id, extra.token, 6), false);
     store.finishRun(second.id, second.token, 'succeeded');

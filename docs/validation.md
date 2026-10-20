@@ -143,7 +143,7 @@ Schema v4 adds nullable run usage without changing prior idempotency fingerprint
 
 Limits tests cover native request shapes without inference, account-field filtering, denial flags, reset-time conversion, unavailable versus unsupported responses, authentication and timeout errors, empty multi-bucket fallback, cancellation/cleanup and coalescing only pending requests. Claude's SDK quota method remains experimental. Missing or partial native data is not replaced with invented values.
 
-The fixed four-job ceiling is removed; a positive safe integer or `unlimited` is accepted, with the existing default of one preserved. Six separate worker processes can claim independent jobs with no finite limit, while turns sharing a conversation remain queued. A finite limit of six is also enforced. Configuration round trips, queue backoff and bounded tolerance for SQLite contention have regression coverage. This is not a large-scale concurrency soak test or a promise of unlimited machine/account capacity.
+The fixed four-job ceiling is removed; a positive safe integer or `unlimited` is accepted, initially with the existing default of one preserved. Six separate worker processes can claim independent jobs with no finite limit, while turns sharing a conversation remain queued. A finite limit of six is also enforced. Configuration round trips, queue backoff and bounded tolerance for SQLite contention have regression coverage. This is not a large-scale concurrency soak test or a promise of unlimited machine/account capacity.
 
 Opus 5.5/high reviewed the design, implementation and fixes through Agent Bridge. Its findings about telemetry storage failures, empty Codex bucket maps, falsely available empty quotas and an unverified extra-usage percentage scale were corrected and covered by regressions. Its final read-only review found no remaining blockers, conditional on the final cross-platform checks above, which then passed. Existing native permission acceptance is retained as prior evidence; this change does not claim another exhaustive live run of all permission modes.
 
@@ -183,3 +183,7 @@ Repeat with `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-fork.ts` after b
 - The plugin packaging is included, but this validation used MCP clients/CLI directly; marketplace installation is not claimed.
 
 Real-model scripts are optional and consume the selected native account usage. Local detailed evidence is ignored under `.local/`; do not commit private transcripts or state directories.
+
+## Unlimited concurrency by default (2026-10-20)
+
+The default is now `unlimited` in both configuration and direct job admission. The cross-process regression admits six independent workers using a mixture of omitted and explicit unlimited limits, while a follow-up in the same conversation waits for its earlier turn. Explicit finite limits remain supported. Existing MCP connections and workers retain their loaded setting until restarted; this change does not restart or cancel active work.

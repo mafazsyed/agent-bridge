@@ -357,7 +357,7 @@ export class Store {
       JSON.stringify(usage), runId, token) === 1;
   }
 
-  claimRun(runId: string, token: string, maxActive: ConcurrencyLimit = 1): boolean {
+  claimRun(runId: string, token: string, maxActive: ConcurrencyLimit = 'unlimited'): boolean {
     if (maxActive !== 'unlimited' && (!Number.isSafeInteger(maxActive) || maxActive < 1)) throw new BridgeError('invalid_config', 'Invalid concurrency limit.');
     const now = this.now();
     return this.tx(() => {

@@ -6,7 +6,7 @@ import { BridgeError, type Runtime } from './types.js';
 export type ConcurrencyLimit = number | 'unlimited';
 export interface Config { stateDir: string; executable: string; codexExecutable?: string; maxActive: ConcurrencyLimit; staleMs: number }
 
-export function parseConcurrency(raw = '1'): ConcurrencyLimit {
+export function parseConcurrency(raw = 'unlimited'): ConcurrencyLimit {
   raw = raw.trim().toLowerCase();
   if (raw === 'unlimited') return raw;
   const value = Number(raw);

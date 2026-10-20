@@ -142,6 +142,7 @@ test('unlimited worker configuration round trips as a string; brief SQLite conte
   const env = workerEnv({ ...settings, maxActive: 'unlimited' }, {});
   assert.equal(env.AGENT_BRIDGE_MAX_ACTIVE, 'unlimited');
   assert.equal(parseConcurrency(env.AGENT_BRIDGE_MAX_ACTIVE), 'unlimited');
+  assert.equal(parseConcurrency(), 'unlimited');
   assert.equal(parseConcurrency(' Unlimited '), 'unlimited'); assert.equal(parseConcurrency('100'), 100);
   for (const bad of ['1e3', '0x10']) assert.throws(() => parseConcurrency(bad), { code: 'invalid_config' });
   assert.equal(tolerateBusy({ code: 'ERR_SQLITE_ERROR', errcode: 5 }, 100, 1000, 200), true);

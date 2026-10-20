@@ -48,11 +48,13 @@ test('startup failure becomes a durable terminal record', () => {
   } finally { bridge.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('configuration allows explicit unlimited concurrency and removes the four-job ceiling', () => {
+test('configuration defaults to unlimited concurrency and retains explicit finite limits', () => {
   const prev = process.env.AGENT_BRIDGE_MAX_ACTIVE;
   const oldPath = process.env.AGENT_BRIDGE_CLAUDE_PATH;
   try {
     process.env.AGENT_BRIDGE_CLAUDE_PATH = process.execPath;
+    process.env.AGENT_BRIDGE_MAX_ACTIVE = '1';
+    assert.equal(config().maxActive, 1);
     process.env.AGENT_BRIDGE_MAX_ACTIVE = '99';
     assert.equal(config().maxActive, 99);
     process.env.AGENT_BRIDGE_MAX_ACTIVE = 'unlimited';
@@ -62,7 +64,7 @@ test('configuration allows explicit unlimited concurrency and removes the four-j
       assert.throws(config, /positive safe integer or unlimited/);
     }
     delete process.env.AGENT_BRIDGE_MAX_ACTIVE;
-    assert.equal(config().maxActive, 1);
+    assert.equal(config().maxActive, 'unlimited');
   } finally {
     if (prev === undefined) delete process.env.AGENT_BRIDGE_MAX_ACTIVE; else process.env.AGENT_BRIDGE_MAX_ACTIVE = prev;
     if (oldPath === undefined) delete process.env.AGENT_BRIDGE_CLAUDE_PATH; else process.env.AGENT_BRIDGE_CLAUDE_PATH = oldPath;

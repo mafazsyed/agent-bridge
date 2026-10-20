@@ -224,7 +224,7 @@ Broad access is opt-in through the explicit selection. Host agents must have the
 
 ## Parallel jobs, model changes and forks
 
-Multiple conversations can use different runtimes, models, effort levels and permission selections. `AGENT_BRIDGE_MAX_ACTIVE` accepts any positive safe integer or `unlimited` (default 1); there is no four-job ceiling. Additional jobs queue when a finite limit is reached. A job waiting for approval occupies a slot. Turns within one conversation remain serialized even with unlimited concurrency. Configure the same limit in every client sharing that state directory. Workers cannot recursively delegate through Bridge. Every queued job has a worker process, and every active job also starts a native runtime; choose concurrency to suit your machine and account quota. Queued polling backs off with jitter, and brief SQLite contention is retried within the lease window.
+Multiple conversations can use different runtimes, models, effort levels and permission selections. `AGENT_BRIDGE_MAX_ACTIVE` accepts any positive safe integer or `unlimited` (the default); there is no four-job ceiling. Additional jobs queue when a finite limit is reached. A job waiting for approval occupies a slot. Turns within one conversation remain serialized even with unlimited concurrency. Configure the same limit in every client sharing that state directory. After updating an existing installation, restart its MCP connections to load the new default; already-running workers keep their launch-time setting. Workers cannot recursively delegate through Bridge. Every queued job has a worker process, and every active job also starts a native runtime; choose concurrency to suit your machine and account quota. Queued polling backs off with jitter, and brief SQLite contention is retried within the lease window.
 
 To change model or effort, submit the next `start_run` with the existing `conversationId` and the desired values from `list_models`. This preserves the native history and workspace. Overrides apply only to that run: an omitted value on a later turn returns to the saved conversation default. Bridge does not change models during a running turn. Switching between Claude and Codex requires a new conversation.
 
@@ -295,7 +295,7 @@ There is no exactly-once execution guarantee, no promise that work survives a ma
 | `AGENT_BRIDGE_HOME` | Dedicated `~/.agent-bridge` state directory |
 | `AGENT_BRIDGE_CLAUDE_PATH` | Native `claude` / `claude.exe` found on PATH |
 | `AGENT_BRIDGE_CODEX_PATH` | Native `codex` / `codex.exe`; standard npm native binary discovery on Windows |
-| `AGENT_BRIDGE_MAX_ACTIVE` | `1` (positive safe integer or `unlimited`) |
+| `AGENT_BRIDGE_MAX_ACTIVE` | `unlimited` (or a positive safe integer) |
 
 The local SQLite ledger stores prompts, results, progress, permission input and workspace paths. It may contain sensitive task content. State directory and file modes are private on POSIX; Windows access depends on the user's filesystem ACLs. Point the state variable only at a dedicated directory: the bridge applies private directory permissions. The bridge adds no telemetry and does not log authentication environment values. Claude has its own data handling and authentication policies.
 
