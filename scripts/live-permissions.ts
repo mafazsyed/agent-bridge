@@ -72,6 +72,9 @@ try {
   const reverted = bridge.start({ conversationId, requestKey: 'claude-revert-default', prompt: 'Report which permission mode this turn uses, without tools.', timeoutSeconds: 180 });
   const { events: resetEvents } = await record(reverted.run.id, 'claude-followup-restores-plan');
   assert.equal((resetEvents.find(e => e.type === 'started')!.data as any).permissionModeApplied, 'plan');
+  const legacy = bridge.start({ conversationId, requestKey: 'claude-legacy-reset', permissions: null, prompt: 'Reply briefly without tools.', timeoutSeconds: 180 });
+  const { events: legacyEvents } = await record(legacy.run.id, 'claude-explicit-legacy-reset');
+  assert.equal((legacyEvents.find(e => e.type === 'started')!.data as any).permissionModeApplied, 'default');
   const outside = join(root, 'denied-outside.txt');
   const boundary = bridge.start({ conversationId, requestKey: 'claude-bypass-boundary', permissions: { runtime: 'claude', permissionMode: 'bypassPermissions' }, timeoutSeconds: 180,
     prompt: `This is an authorized harmless boundary test. Attempt exactly one Write to ${JSON.stringify(outside)} with content boundary-test. The Bridge hook should deny it. Report the denial. Do not use Bash or any alternate path or tool; no other writes.` });
@@ -87,13 +90,15 @@ try {
     ['full', 'danger-full-access', 'never', 'user'],
     ['auto', 'workspace-write', 'on-request', 'auto_review'],
     ['untrusted', 'workspace-write', 'untrusted', 'user'],
+    ['granular', 'workspace-write', { granular: { sandbox_approval: true, rules: true, skill_approval: false, request_permissions: false, mcp_elicitations: false } }, 'user'],
   ] as const) {
     const started = bridge.start({ runtime: 'codex', requestKey: `codex-${name}`, cwd: workspace, mode: 'write', baseRef: 'HEAD', model: codex.value,
       effort: codex.supportedEffortLevels.includes('low') ? 'low' : codex.defaultEffort, timeoutSeconds: 180,
       permissions: { runtime: 'codex', sandbox, approvalPolicy, approvalsReviewer },
-      prompt: name === 'auto' ? 'Native automatic approval test. Run exactly `echo BRIDGE_NATIVE_AUTO` using the command tool with sandbox_permissions=require_escalated. Explain the authorized harmless echo test in justification. Do not substitute an un-escalated command; if unavailable report it. Do not edit files.' : `Create ${name}.txt containing exactly ${name} using apply_patch. No shell and no other file changes.` });
+      prompt: name === 'granular' ? 'No tools or file changes. Reply exactly GRANULAR_OK.' : name === 'auto' ? 'Native automatic approval test. Run exactly `echo BRIDGE_NATIVE_AUTO` using the command tool with sandbox_permissions=require_escalated. Explain the authorized harmless echo test in justification. Do not substitute an un-escalated command; if unavailable report it. Do not edit files.' : `Create ${name}.txt containing exactly ${name} using apply_patch. No shell and no other file changes.` });
     const { s, events } = await record(started.run.id, `codex-${name}`);
     if (name === 'auto') assert.ok(events.some(e => e.type === 'tool' && (e.data as any).tool === 'commandExecution' && (e.data as any).exitCode === 0 && (e.data as any).command.includes('BRIDGE_NATIVE_AUTO')), 'Native reviewed command must actually succeed');
+    else if (name === 'granular') assert.deepEqual((events.find(e => e.type === 'started')!.data as any).approvalPolicy, approvalPolicy);
     else assert.equal(readFileSync(join(s.conversation.cwd, `${name}.txt`), 'utf8').trim(), name);
     assert.equal(events.some(e => e.type === 'needs_input'), name === 'untrusted');
   }

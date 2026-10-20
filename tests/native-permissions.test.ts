@@ -10,7 +10,10 @@ import { Bridge } from '../src/service.js';
 import { Store } from '../src/store.js';
 import { CLAUDE_PERMISSION_MODES, runtimePermissionsSchema, validatePermissions, type RuntimePermissions } from '../src/permission-options.js';
 import { claudePermissionPolicy, runClaude } from '../src/runtime.js';
-import { discoverClaudePermissions, codexPermissionCatalogue } from '../src/permission-discovery.js';
+import { discoverClaudePermissions, discoverCodexPermissions, codexPermissionCatalogue } from '../src/permission-discovery.js';
+import { mkdirSync } from 'node:fs';
+import { BridgeError } from '../src/types.js';
+import { CodexRpcError } from '../src/codex-client.js';
 import type { query, Options, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 function setup() {
@@ -60,33 +63,46 @@ test('runtime schemas reject cross keys, unknown aliases, incomplete granular po
   for (const sandbox of ['workspace-write', 'danger-full-access'] as const) assert.throws(() => validatePermissions({ runtime: 'codex', sandbox, approvalPolicy: 'never', approvalsReviewer: 'user' }, 'codex', 'review'), { code: 'invalid_permissions' });
 });
 
-async function runFixture(permissions: RuntimePermissions | null, work: (options: Options, f: ReturnType<typeof setup>, runId: string) => Promise<void>, override: { applied?: string; initMode?: string; setError?: boolean; autoSupported?: boolean } = {}) {
+async function runFixture(permissions: RuntimePermissions | null, work: (options: Options, f: ReturnType<typeof setup>, runId: string) => Promise<void>, override: {
+  applied?: string; initMode?: string; setError?: boolean; autoSupported?: boolean; unknownModel?: boolean; hooksApplied?: boolean;
+  setupHang?: 'initialize' | 'models' | 'mode' | 'reinitialize'; cancelSetup?: boolean; drainHang?: boolean; abortDuringDrain?: boolean;
+} = {}) {
   const f = setup();
   const submitted = f.bridge.start({ requestKey: randomUUID(), prompt: 'fixture', cwd: f.root });
   const run = { ...f.bridge.store.getRun(submitted.run.id), permissions };
   const conversation = { ...submitted.conversation, mode: 'write' as const };
   f.bridge.store.attachWorker(run.id, 'fixture', process.pid); f.bridge.store.claimRun(run.id, 'fixture');
-  let received = false, closed = false, options!: Options;
+  let received = false, closed = false, drained = false, options!: Options;
+  const abort = new AbortController();
+  const control = async (name: typeof override.setupHang) => {
+    if (override.setupHang !== name) return;
+    if (override.cancelSetup) setTimeout(() => abort.abort(), 5);
+    await new Promise(() => {});
+  };
   const selected = permissions?.runtime === 'claude' ? permissions.permissionMode : 'default';
   const open = ((input: Parameters<typeof query>[0]) => {
     options = input.options!;
     return {
-      initializationResult: async () => ({}),
-      supportedModels: async () => [{ value: run.model, supportsAutoMode: override.autoSupported ?? true }],
-      setPermissionMode: async (mode: string) => { assert.equal(received, false); assert.equal(mode, selected); if (override.setError) throw new Error('organization denied'); },
-      reinitialize: async () => ({ current_permission_mode: override.applied ?? selected }),
+      initializationResult: async () => { await control('initialize'); return {}; },
+      supportedModels: async () => { await control('models'); return [{ value: override.unknownModel ? 'other-model' : run.model, supportsAutoMode: override.autoSupported ?? true }]; },
+      setPermissionMode: async (mode: string) => { await control('mode'); assert.equal(received, false); assert.equal(mode, selected); if (override.setError) throw new Error('organization denied'); },
+      reinitialize: async () => { await control('reinitialize'); return { current_permission_mode: override.applied ?? selected, hooks_applied: override.hooksApplied ?? true }; },
       close: () => { closed = true; },
       async *[Symbol.asyncIterator]() {
-        if (typeof input.prompt !== 'string') { const p = await input.prompt[Symbol.asyncIterator]().next(); assert.equal(p.value.message.content, 'fixture'); }
+        const incoming = typeof input.prompt === 'string' ? null : input.prompt[Symbol.asyncIterator]();
+        if (incoming) { const p = await incoming.next(); assert.equal(p.value.message.content, 'fixture'); }
         received = true;
         yield { type: 'system', subtype: 'init', session_id: conversation.id, model: 'fixture', permissionMode: override.initMode ?? selected };
         await work(options, f, run.id);
         yield { type: 'result', subtype: 'success', session_id: conversation.id, is_error: false, result: 'done' };
-        if (permissions) await new Promise(() => {}); // A live streaming runtime waits for another turn.
+        if (override.abortDuringDrain) { abort.abort(); assert.equal(closed, false, 'Completed native turn must flush before close'); }
+        if (override.drainHang) await new Promise(() => {});
+        if (incoming) assert.equal((await incoming.next()).done, true);
+        drained = true;
       },
     };
   }) as unknown as typeof query;
-  try { await runClaude(f.settings, f.bridge.store, run, conversation, 'fixture', new AbortController(), open); return { received, closed, options }; }
+  try { await runClaude(f.settings, f.bridge.store, run, conversation, 'fixture', abort, open, { setupMs: 40, drainMs: 40 }); return { received, closed, drained, options }; }
   catch (error) { Object.assign(error as Error, { received, closed }); throw error; }
   finally { f.clean(); }
 }
@@ -104,10 +120,9 @@ for (const permissionMode of CLAUDE_PERMISSION_MODES) test(`Claude native ${perm
     else assert.deepEqual(edit, {});
     assert.equal((await hook(options, 'Write', { file_path: join(f.root, '..', 'outside.txt') }, permissionMode) as any).hookSpecificOutput.permissionDecision, 'deny');
     assert.equal((await hook(options, 'Bash', { command: 'echo test', run_in_background: true }, permissionMode) as any).hookSpecificOutput.permissionDecision, 'deny');
-    assert.equal((await hook(options, 'Read', { file_path: join(f.root, 'file.txt') }) as any).hookSpecificOutput.permissionDecision, 'deny');
     assert.equal((await hook(options, 'Write', { file_path: join(f.root, '.codex', 'config.toml') }, permissionMode) as any).hookSpecificOutput.permissionDecision, 'deny');
   });
-  assert.equal(result.received, true); assert.equal(result.closed, true);
+  assert.equal(result.received, true); assert.equal(result.closed, true); assert.equal(result.drained, true);
 });
 
 test('Claude native callback forwards an edit instead of auto-allowing like the legacy preset', async () => {
@@ -123,11 +138,37 @@ test('Claude native callback forwards an edit instead of auto-allowing like the 
     assert.equal((await hook(options, 'Bash', { command: 'echo test' }) as any).hookSpecificOutput.permissionDecision, 'ask');
   });
 });
-for (const override of [{ applied: 'default' }, { setError: true }, { autoSupported: false }]) test(`Claude unavailable mode refuses before prompt: ${JSON.stringify(override)}`, async () => {
+for (const override of [{ applied: 'default' }, { setError: true }, { autoSupported: false }, { unknownModel: true }, { hooksApplied: false }]) test(`Claude unavailable mode refuses before prompt: ${JSON.stringify(override)}`, async () => {
   await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'auto' }, async () => { throw new Error('no tools'); }, override), { code: 'permissions_unavailable', received: false, closed: true });
 });
 test('Claude post-dispatch mode drift is uncertain, never silently downgraded', async () => {
   await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'acceptEdits' }, async () => { throw new Error('no tools'); }, { initMode: 'default' }), { code: 'unknown_outcome', received: true, closed: true });
+});
+test('legacy reset rejects a resumed native mode', async () => {
+  await assert.rejects(runFixture(null, async () => { throw new Error('no tools'); }, { initMode: 'bypassPermissions' }), { code: 'unknown_outcome', received: true, closed: true });
+});
+for (const permissions of [null, { runtime: 'claude' as const, permissionMode: 'bypassPermissions' as const }]) test(`hook mode drift is recorded and cannot finish successfully: ${JSON.stringify(permissions)}`, async () => {
+  await assert.rejects(runFixture(permissions, async (options, f, id) => {
+    const result = await hook(options, 'Read', { file_path: join(f.root, 'file.txt') }, 'unexpected');
+    assert.equal((result as any).hookSpecificOutput.permissionDecision, 'deny');
+    assert.ok(f.bridge.store.events(id, 0).some(e => e.type === 'warning' && (e.data as any).code === 'permission_mode_changed'));
+  }), { code: 'unknown_outcome', received: true, closed: true });
+});
+for (const setupHang of ['initialize', 'models', 'mode', 'reinitialize'] as const) for (const cancelSetup of [false, true]) test(`Claude setup ${setupHang} is bounded and cancellation is predispatch: ${cancelSetup}`, async () => {
+  await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'auto' }, async () => { throw new Error('no tools'); }, { setupHang, cancelSetup }), { code: cancelSetup ? 'cancelled' : 'permissions_unavailable', received: false, closed: true });
+});
+test('a result followed by stuck transcript shutdown is uncertain and bounded', async () => {
+  await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'default' }, async () => {}, { drainHang: true }), { code: 'unknown_outcome', received: true, closed: true, completedResult: 'done' });
+});
+test('a missing native hook permission mode is denied and cannot finish successfully', async () => {
+  await assert.rejects(runFixture({ runtime: 'claude', permissionMode: 'default' }, async (options, f) => {
+    const result = await hook(options, 'Read', { file_path: join(f.root, 'file.txt') });
+    assert.equal((result as any).hookSpecificOutput.permissionDecision, 'deny');
+  }), { code: 'unknown_outcome', completedResult: 'done' });
+});
+test('cancellation racing a completed native turn still allows transcript flush', async () => {
+  const result = await runFixture({ runtime: 'claude', permissionMode: 'default' }, async () => {}, { abortDuringDrain: true });
+  assert.equal(result.drained, true); assert.equal(result.closed, true);
 });
 
 test('Claude discovery probes native controls without a model turn or persisted session', async () => {
@@ -146,9 +187,22 @@ test('Claude discovery bounds unresponsive controls', async () => {
   assert.equal(closed, true);
 });
 test('Codex discovery uses native enums and reports new unsupported values without guessing', () => {
-  const value = codexPermissionCatalogue({ definitions: { AskForApproval: { oneOf: [{ enum: ['never', 'new-policy'] }, { properties: { granular: {} } }] }, ApprovalsReviewer: { enum: ['user', 'auto_review', 'guardian_subagent'] }, SandboxMode: { enum: ['read-only', 'workspace-write', 'danger-full-access'] } } }, { allowedSandboxModes: ['read-only'] });
+  const value = codexPermissionCatalogue({ definitions: { AskForApproval: { oneOf: [{ enum: ['never', 'new-policy'] }, { properties: { granular: {} } }] }, ApprovalsReviewer: { enum: ['user', 'auto_review', 'guardian_subagent'] }, SandboxMode: { enum: ['read-only', 'workspace-write', 'danger-full-access'] } } }, { allowedSandboxModes: ['read-only'], allowedApprovalsReviewers: ['user'] });
   assert.deepEqual(value.approvalPolicy.find(v => v.value === 'new-policy'), { value: 'new-policy', supported: false, allowedByRequirements: null });
   assert.equal(value.sandbox.find(v => v.value === 'danger-full-access')!.allowedByRequirements, false);
   assert.equal(value.approvalsReviewer.find(v => v.value === 'guardian_subagent')!.supported, false);
+  assert.equal(value.approvalsReviewer.find(v => v.value === 'auto_review')!.allowedByRequirements, false);
   assert.throws(() => codexPermissionCatalogue({}, null), { code: 'permission_discovery_failed' });
+});
+for (const outcome of ['unsupported', 'missing', 'denied']) test(`Codex requirements discovery distinguishes unknown policy from failure: ${outcome}`, async () => {
+  const promise = discoverCodexPermissions({ executable: '', codexExecutable: 'fixture', stateDir: 'unused', maxActive: 1, staleMs: 1000 }, {
+    generate: async (_, cwd) => { mkdirSync(join(cwd, 'v2')); writeFileSync(join(cwd, 'v2', 'ThreadStartParams.json'), JSON.stringify({ definitions: { AskForApproval: { enum: ['never'] }, SandboxMode: { enum: ['read-only'] }, ApprovalsReviewer: { enum: ['user'] } } })); },
+    open: () => ({ initialize: async () => {}, request: async () => {
+      if (outcome === 'missing') return {};
+      if (outcome === 'unsupported') throw new CodexRpcError(-32601, 'Localized unsupported request');
+      throw new BridgeError('codex_rpc', 'Access denied');
+    }, close: async () => {} }) as any,
+  });
+  if (outcome === 'denied') await assert.rejects(promise, /Access denied/);
+  else { const result = await promise; assert.equal(result.requirements, null); assert.equal(result.approvalsReviewer[0]!.allowedByRequirements, null); }
 });

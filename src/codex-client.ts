@@ -2,6 +2,9 @@ import { spawn, execFile, execFileSync, type ChildProcessWithoutNullStreams } fr
 import { BridgeError } from './types.js';
 
 export type RpcMessage = { id?: string | number; method?: string; params?: any; result?: any; error?: { code: number; message: string } };
+export class CodexRpcError extends BridgeError {
+  constructor(public rpcCode: number, message: string) { super('codex_rpc', message); }
+}
 // These override child configuration only. Never write the user's Codex settings or copy auth.
 export const CODEX_CONFIG = {
   'features.apps': false, 'features.plugins': false, 'features.hooks': false,
@@ -93,7 +96,7 @@ export class CodexClient {
         else if (typeof m.id === 'number') {
           const p = this.pending.get(m.id); if (!p) continue;
           this.pending.delete(m.id); clearTimeout(p.timer);
-          if (m.error) p.reject(new BridgeError('codex_rpc', String(m.error.message).slice(0, 2000)));
+          if (m.error) p.reject(new CodexRpcError(m.error.code, String(m.error.message).slice(0, 2000)));
           else p.resolve(m.result);
         } else throw new Error('Invalid RPC envelope');
       } catch { this.fail(new BridgeError('codex_protocol', 'Invalid Codex protocol frame or notification.')); return; }

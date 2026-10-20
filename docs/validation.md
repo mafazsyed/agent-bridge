@@ -87,34 +87,46 @@ The final automated suite passed 72 tests on Mac and Linux, and 71 on Windows wi
 
 The Mac's Claude Code user configuration now registers Agent Bridge, and its `codex-delegation` skill is installed. A fresh native connection check reports the server connected. The repository provides the same setup instructions for other machines; acceptance profiles do not silently install user-wide MCP configuration there.
 
-## Native permission selectors (2026-10-19)
+## Native permission selectors (2026-10-19; live checks completed 2026-10-20)
 
 The default controlled-delegation policy is preserved. New native selections are stored independently per run, with a saved conversation default and explicit null reset. Schema v3 adds nullable JSON columns; v1/v2 migration, old request fingerprints, resume overrides and queued-run isolation have regression coverage.
 
 | Check | macOS | Ubuntu | Windows |
 | --- | --- | --- | --- |
-| Full automated suite | 96 passed | 96 passed | 95 passed; POSIX trailing-space case skipped |
-| Final native-permission and runtime regressions | 18 passed | 18 passed | 18 passed |
+| Final automated suite | 120 passed | 120 passed | 119 passed; POSIX trailing-space case skipped |
 | Typecheck and build | Passed | Passed | Passed |
 | Native Claude control discovery, no inference | All six modes confirmed | All six modes confirmed | All six modes confirmed |
 | Native Codex schema/requirements discovery | Passed | Passed | Passed |
 | Codex full-access isolated file edit | Passed | Passed | Passed |
 | Codex automatic review of harmless escalated echo | Passed, no host approval | Passed, no host approval | Passed, no host approval |
 | Codex untrusted policy file-edit approval | Passed, one exact approval | Passed, one exact approval | Passed, one exact approval |
+| Codex granular policy round trip and completed turn | Passed | Passed | Passed |
+| Claude plan, default, acceptEdits, dontAsk, auto, bypassPermissions | All six passed | All six passed | All six passed |
+| Claude follow-up restores the conversation's plan default | Passed | Passed | Passed |
+| Claude explicit null restores original Bridge permissions | Passed | Passed | Passed |
+| Claude bypass still denies a direct out-of-workspace Write | Passed; real hook invoked | Passed; real hook invoked | Passed; real hook invoked |
 
 The MCP handler additionally verifies nested permission input and rejects mixed-runtime keys. Fixtures cover all six Claude choices, predispatch downgrade/refusal, model-level auto refusal, mode drift after dispatch, per-tool mode guards, protected paths, explicit callbacks, no-prompt discovery, Codex reviewer/policy downgrade, granular policy forwarding and refusal of unexpected escalation under never.
 
-The real SDK test found that a held streaming input kept a completed Claude turn open. The worker now ends the stream on the terminal result; a fixture which remains open after that result prevents regression. Claude session-limit failures now classify as rate_limited.
+The real SDK test found that a held streaming input kept a completed Claude turn open. On the terminal result, the worker now ends its input and lets the CLI flush its transcript and exit normally, bounded to ten seconds. Failed shutdown retains the completed answer with an uncertainty warning. A real SDK fixture verifies flush-before-exit and answer retention after a crash. Cancellation after a result still allows the bounded flush. Claude session-limit failures now classify as rate_limited.
 
-Claude inference coverage is **partial**. On macOS, the Bridge plan run made no writes, a native default run forwarded one Write for approval and completed it, and an independent native acceptEdits probe created its fixture without approval. A Bridge acceptEdits run on this external drive correctly forwarded a native path warning: Claude classified the drive's trailing-space component as a suspicious Windows path pattern. Bridge retained that decision instead of overriding it. Native mode behavior is tested in neutral temporary directories to avoid confusing that separate runtime safeguard with a mode-selection bug.
+All thirteen live cases (nine Claude and four Codex) passed on macOS, Ubuntu and Windows on 2026-10-20 after the graceful-shutdown change. Plan and dontAsk made no fixture file, default required exactly one approved Write, and acceptEdits, auto and bypassPermissions wrote their requested fixture without host approval. The same conversation resumed across these modes. An omitted follow-up restored the original plan selection, and explicit null restored default, verified from runtime events. Bypass's attempted outside Write invoked the real deny hook and created no file. Codex echoed all five granular booleans unchanged and completed its turn.
 
-Further real Claude inference tests (including the bypass out-of-workspace deny-hook exercise, dontAsk, auto, and restored-default follow-up) were blocked by the Claude account session limit. Do not claim those native cases passed; their Bridge paths have automated coverage. Opus 5.5 completed the design consultation. Its second implementation review was submitted but returned the same usage limit, so no second Opus approval is claimed. Native discovery and model-free tests remain available during this limit. macOS used Claude 2.1.302, Ubuntu 2.1.295, and Windows 2.1.303. Codex acceptance used 0.163.0 on all three hosts.
+An earlier acceptEdits run on the external Mac drive correctly forwarded a native path warning: Claude classified the drive's trailing-space component as a suspicious Windows path pattern. Bridge retained that decision instead of overriding it. Native mode behavior is tested in neutral temporary directories to avoid confusing that separate runtime safeguard with a mode-selection bug. The earlier account-limit blocker cleared before the completed runs. macOS used Claude 2.1.302, Ubuntu 2.1.295, and Windows 2.1.303. Codex acceptance used 0.163.0 on all three hosts. The final typechecks, full automated suites and builds were repeated on all three hosts after the remaining error/cancellation fixes; those paths use deterministic transport regressions rather than another repeat of unchanged successful model calls.
+
+Opus 5.5's review prompted additional regressions for every hung startup control, cancellation and deadline before dispatch, missing/mismatched hook modes, native-to-legacy reset, unavailable auto models, rejected hooks and numeric Codex method-not-found errors. Known unstarted work no longer receives an uncertain-conversation fence. Reviewer restrictions from native administrative requirements are reported. On a live Mac shell probe, native default's outside-fixture read asked once, while acceptEdits's harmless mkdir ran without host approval; Bridge's original policy still asks for every Bash command.
+
+Opus 5.5 completed a final read-only review of the fixes on 2026-10-20 and found no remaining actionable bugs. It checked answer retention after failed shutdown, cancellation after a delivered result, numeric RPC error handling and missing hook-mode rejection. The implementing agent independently ran the final cross-platform checks above. This is source review and test evidence, not a guarantee of compatibility with every native runtime version.
+
+A no-inference capability probe on 2026-10-20 confirmed native account limits through Codex `account/rateLimits/read` and Claude SDK `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })`. Claude's method is explicitly unstable. These are feasibility checks, not implemented Bridge tools; no account details or usage snapshots are committed.
+
+An isolated Mac ledger with `maxActive: 2` also ran Claude Sonnet 5.5 / requested low effort and Codex GPT-6.1 Sol / medium effort concurrently; both succeeded and their running states overlapped. A follow-up changed that same Claude session to Haiku 5.5 / requested medium effort and correctly recalled a marker from the Sonnet turn. Claude reported the changed model and unchanged session ID, but omitted applied effort, so the effort values remain requested rather than independently verified. The regular shared ledger's concurrency setting was unchanged.
 
 Run `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-permissions.ts` after building to repeat the native acceptance. Set `AGENT_BRIDGE_LIVE_RUNTIME=claude` or `codex` for a single runtime; this is an explicit test selection, not a model fallback. It consumes native account usage and writes isolated temporary workspaces plus a local evidence.json. Codex automatic-review testing verifies an actual escalated command succeeds without a Bridge permission response, not just a returned configuration value. These Windows cases run over SSH because they use native file patches and an explicitly escalated command; they do not re-claim general Windows sandbox process compatibility under SSH.
 
 ## Limits
 
-- Native acceptance covers the specific Mac, Windows and Linux configurations above, with Opus 5.5 and a Sonnet 5.5 follow-up. It does not establish compatibility with every shell, operating-system version, model or enterprise policy.
+- Native acceptance covers the specific Mac, Windows and Linux configurations and models described above. It does not establish compatibility with every shell, operating-system version, model or enterprise policy.
 - Sleep handling has a stale-clock/process-identity regression test; no physical laptop sleep test was performed.
 - Local job persistence survives client exit, not arbitrary OS termination. No automatic wake-up of an idle host and no exactly-once execution guarantee.
 - Worktrees and tool restrictions are not an OS sandbox. Approved commands and trusted repository checkout filters can have broader effects.

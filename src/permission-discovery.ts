@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { Config } from './config.js';
 import { BridgeError, type Runtime } from './types.js';
 import { claudeOptions } from './claude-options.js';
-import { CodexClient } from './codex-client.js';
+import { CodexClient, CodexRpcError } from './codex-client.js';
 import { CLAUDE_PERMISSION_MODES, CODEX_APPROVAL_POLICIES, CODEX_REVIEWERS, CODEX_SANDBOXES } from './permission-options.js';
 
 const descriptions = {
@@ -71,7 +71,7 @@ export function codexPermissionCatalogue(schema: any, requirements: any) {
   return { runtime: 'codex' as const, source: 'codex-generated-schema' as const,
     sandbox: fields(sandboxes, CODEX_SANDBOXES, requirements?.allowedSandboxModes),
     approvalPolicy: fields(approval, CODEX_APPROVAL_POLICIES, requirements?.allowedApprovalPolicies),
-    approvalsReviewer: fields(reviewers, CODEX_REVIEWERS),
+    approvalsReviewer: fields(reviewers, CODEX_REVIEWERS, requirements?.allowedApprovalsReviewers),
     granularApproval: defs.AskForApproval?.oneOf?.some((v: any) => v.properties?.granular) === true,
     requirements: requirements ?? null, defaultSelection: null,
     notes: [
@@ -93,9 +93,18 @@ export async function discoverCodexPermissions(settings: Config, { timeoutMs = 2
     await generate(settings.codexExecutable, cwd);
     const schema = JSON.parse(await readFile(join(cwd, 'v2', 'ThreadStartParams.json'), 'utf8'));
     client = open(settings.codexExecutable, cwd); const c = client;
-    const requirements = await Promise.race([(async () => { await c.initialize(); return c.request('configRequirements/read', undefined); })(),
+    const requirements = await Promise.race([(async () => {
+      await c.initialize();
+      try { return await c.request('configRequirements/read', undefined); }
+      catch (error) {
+        // Older servers may lack this read-only method. Unknown restrictions are
+        // not permission: each actual run still verifies its effective controls.
+        if (error instanceof CodexRpcError && error.rpcCode === -32601) return null;
+        throw error;
+      }
+    })(),
       new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new BridgeError('permission_discovery_timeout', 'Codex permission discovery timed out.')), timeoutMs); })]);
-    return codexPermissionCatalogue(schema, requirements.requirements);
+    return codexPermissionCatalogue(schema, requirements?.requirements);
   } finally { clearTimeout(timer); await client?.close(); await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => {}); }
 }
 

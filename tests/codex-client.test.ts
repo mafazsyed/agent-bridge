@@ -9,6 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { CodexClient } from '../src/codex-client.js';
 import { codexModels } from '../src/codex-models.js';
 const fixture = fileURLToPath(new URL('./fixtures/codex-app-server.mjs', import.meta.url));
+test('Codex RPC errors retain the native code independently of message wording', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-rpc-'));
+  const client = new CodexClient(process.execPath, root, { args: [fixture, 'discovery', join(root, 'rpc.jsonl')] });
+  try { await client.initialize(); await assert.rejects(client.request('configRequirements/read', undefined), { code: 'codex_rpc', rpcCode: -32601 }); }
+  finally { await client.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
 test('real stdio model probe uses initialize then paginated model/list, no turns or account data', async () => {
   const root = mkdtempSync(join(tmpdir(), 'bridge-rpc-')); const record = join(root, 'rpc.jsonl');
   const client = new CodexClient(process.execPath, root, { args: [fixture, 'discovery', record], requestTimeoutMs: 1000 });

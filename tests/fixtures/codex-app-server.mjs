@@ -17,6 +17,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
   const m = JSON.parse(line); appendFileSync(record, line + '\n');
   if (!m.method) { requests.get(m.id)?.(m.result ?? m.error); requests.delete(m.id); return; }
   switch (m.method) {
+    case 'configRequirements/read': send({ id: m.id, error: { code: -32601, message: 'Localized unsupported request' } }); break;
     case 'initialize': if (scenario === 'startup-hang') break; reply(m, { userAgent: 'fixture/1' }); break;
     case 'account/read': reply(m, { account: scenario === 'signed-out' ? null : { type: 'chatgpt' }, requiresOpenaiAuth: true }); break;
     case 'config/read': reply(m, { config: { model: 'native-model', model_reasoning_effort: 'high',

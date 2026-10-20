@@ -145,3 +145,57 @@ test('a real worker deadline closes the SDK transport and settles an unfinished 
     assert.equal(result.run.errorCode, 'timeout');
   } finally { await f.cleanup(); }
 });
+
+test('native SDK turns drain EOF before transcript flush, including a native / legacy / native resume', async () => {
+  const f = await fixture();
+  try {
+    execFileSync('git', ['init', '-q', f.root]);
+    execFileSync('git', ['-C', f.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'Fixture']);
+    let conversationId: string | undefined;
+    for (const permissionMode of ['plan', null, 'bypassPermissions'] as const) {
+      const run = await f.command(['start'], { requestKey: `drain-${permissionMode}`, prompt: 'fixture:flush',
+        ...(conversationId ? { conversationId } : { cwd: f.root, mode: 'write', baseRef: 'HEAD' }),
+        permissions: permissionMode ? { runtime: 'claude', permissionMode } : null });
+      conversationId ??= run.conversation.id;
+      const result = await f.getTerminal(run.run.id);
+      assert.equal(result.run.status, 'succeeded', result.run.result);
+      assert.equal(result.events.find((e: any) => e.type === 'started').data.permissionModeApplied, permissionMode ?? 'default');
+      const trace = readFileSync(f.env.AGENT_BRIDGE_FIXTURE_TRACE, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(trace.filter(e => e.fixture === 'transcript_flushed').length, ['plan', null, 'bypassPermissions'].indexOf(permissionMode) + 1);
+    }
+  } finally { await f.cleanup(); }
+});
+
+for (const stop of ['cancel', 'deadline']) test(`native setup ${stop} ends without a prompt or uncertain-conversation fence`, async () => {
+  const f = await fixture();
+  try {
+    Object.assign(f.env, { AGENT_BRIDGE_FIXTURE_INIT_HANG: '1' });
+    const input = { cwd: f.root, prompt: 'fixture:result', permissions: { runtime: 'claude', permissionMode: 'default' } };
+    const run = await f.command(['start'], { ...input, requestKey: `setup-${stop}`, timeoutSeconds: 10 });
+    for (let i = 0; i < 60; i++) {
+      if (existsSync(f.env.AGENT_BRIDGE_FIXTURE_TRACE)) break;
+      await delay(100);
+    }
+    assert.equal(existsSync(f.env.AGENT_BRIDGE_FIXTURE_TRACE), true, 'Fixture must reach the setup control request');
+    if (stop === 'cancel') await f.command(['cancel', run.run.id]);
+    const result = await f.getTerminal(run.run.id);
+    assert.equal(result.run.status, stop === 'cancel' ? 'cancelled' : 'failed', result.run.result);
+    assert.equal(result.run.errorCode, stop === 'cancel' ? 'cancelled' : 'timeout');
+    const trace = readFileSync(f.env.AGENT_BRIDGE_FIXTURE_TRACE, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(!trace.some(e => e.type === 'user'));
+    delete (f.env as NodeJS.ProcessEnv).AGENT_BRIDGE_FIXTURE_INIT_HANG;
+    const retry = await f.command(['start'], { requestKey: `after-${stop}`, conversationId: run.conversation.id, prompt: 'fixture:flush' });
+    assert.equal((await f.getTerminal(retry.run.id)).run.status, 'succeeded');
+  } finally { await f.cleanup(); }
+});
+test('a native shutdown crash retains the completed answer with its uncertainty warning', async () => {
+  const f = await fixture();
+  try {
+    const run = await f.command(['start'], { requestKey: 'shutdown-crash', cwd: f.root, prompt: 'fixture:flush-crash', permissions: { runtime: 'claude', permissionMode: 'default' } });
+    const result = await f.getTerminal(run.run.id);
+    assert.equal(result.run.status, 'unknown');
+    assert.equal(result.run.errorCode, 'unknown_outcome');
+    assert.match(result.run.result, /Completion could not be verified/);
+    assert.match(result.run.result, /fixture done/);
+  } finally { await f.cleanup(); }
+});

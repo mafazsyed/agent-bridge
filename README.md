@@ -143,6 +143,8 @@ Claude accepts these explicit selections:
 
 The CLI may label `default` as **manual**; the SDK reports `default`. Explicit modes keep Bridge's tool ceiling, file/path checks, protected metadata, no background Bash and cancellation guards. Ordinary actions are deferred to Claude, without hook-based auto-approval or extra pre-approved edit rules. `auto` is subject to account/model/organization restrictions. The runtime must confirm the selected mode **before the prompt is sent**; it is checked again on initialization and tool calls. Incompatible older CLIs and silent downgrades are refused. A mode change after dispatch stops the turn with an uncertain outcome.
 
+Native `default` does not mean every shell command asks: Claude may allow read-only commands, and `acceptEdits` may also allow filesystem commands. Shell commands are not confined by Bridge's direct-file path checks and can access outside the worktree when the native policy permits. Use omitted/null Bridge permissions if every Bash command must go through the host.
+
 ```json
 {
   "requestKey": "implement-with-native-edits-1",
@@ -172,6 +174,14 @@ Pass that object as `permissions`. Sandboxes are `read-only`, `workspace-write` 
 A new conversation saves its initial selection. Follow-ups can override `permissions` **for that run only**, just like model and effort; later omitted values return to the conversation default. This supports planning then editing in the same native session. Requests save their selection at submission, so queued jobs cannot change each other's settings. The run's `started` event reports the applied controls. Explicit `null` returns one run to the original Bridge policy.
 
 Broad access is opt-in through the explicit selection. Host agents must have the human's authorization for that access; a worker or repository cannot grant it. There is no second confirmation checkbox. A worktree does not confine shell commands, and Claude bypass or Codex full access can affect resources outside it. User/organization restrictions can still refuse a selection. Permission discovery is not a guarantee of account quota or every model's capabilities.
+
+## Parallel jobs, model changes and forks
+
+Multiple conversations can use different runtimes, models, effort levels and permission selections. `AGENT_BRIDGE_MAX_ACTIVE` allows 1–4 active jobs per shared state directory (default 1); additional jobs queue. A job waiting for approval occupies a slot. Turns within one conversation remain serialized. Configure the same limit in every client sharing that state directory. Workers cannot recursively delegate through Bridge.
+
+To change model or effort, submit the next `start_run` with the existing `conversationId` and the desired values from `list_models`. This preserves the native history and workspace. Overrides apply only to that run: an omitted value on a later turn returns to the saved conversation default. Bridge does not change models during a running turn. Switching between Claude and Codex requires a new conversation.
+
+Bridge does not yet expose conversation forking or usage/limit reporting. Both runtimes have native session-fork support, but a conversation fork is not a filesystem snapshot; write-worktree handling needs an explicit policy before Bridge can offer it safely. Native account limits are also distinct from a run's token usage or estimated cost. Neither should be inferred from a successful model-list call.
 
 ## Lifetimes and recovery
 

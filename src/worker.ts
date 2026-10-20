@@ -68,8 +68,14 @@ async function main() {
     else store.finishRun(runId, token, 'failed', text, result.errorCode);
   } catch (error) {
     const code = error instanceof BridgeError ? error.code : errorCode(String(error));
-    const status = reason === 'cancelled' ? 'cancelled' : reason || ['unknown_outcome', 'session_identity_changed'].includes(code) ? 'unknown' : 'failed';
-    store.finishRun(runId, attached ? token : null, status, String(error).slice(0, 8000), reason ?? code);
+    // Both runtimes use cancelled only before prompt dispatch. Native Claude
+    // setup failures are also known unstarted work, even if the deadline raced.
+    const knownUnstarted = ['cancelled', 'permissions_unavailable'].includes(code);
+    const status = reason === 'cancelled' || (code === 'cancelled' && !reason) ? 'cancelled' : (reason && !knownUnstarted) || ['unknown_outcome', 'session_identity_changed'].includes(code) ? 'unknown' : 'failed';
+    const text = error instanceof BridgeError && error.completedResult !== undefined
+      ? `[Completion could not be verified: ${String(error).slice(0, 8000)}]\n\n${error.completedResult}`.slice(0, 1_000_000)
+      : String(error).slice(0, 8000);
+    store.finishRun(runId, attached ? token : null, status, text, reason ?? code);
   } finally {
     if (timer) clearInterval(timer);
     process.off('SIGTERM', stop); process.off('SIGINT', stop);
