@@ -87,9 +87,10 @@ test('queued cancellation has no runtime or worker to wait for; active progress 
 test('owned child tracking waits for actual exit, and spawn failures are not started', async () => {
   const f = setup(); let child: ReturnType<typeof spawn> | undefined;
   try {
-    f.claim(); child = spawn(process.execPath, ['-e', 'setTimeout(()=>process.exit(7),250)'], { stdio: 'ignore' });
+    f.claim(); child = spawn(process.execPath, ['-e', "process.stdin.once('data', () => process.exit(7)); process.stdin.resume();"], { stdio: ['pipe', 'ignore', 'ignore'] });
     const done = trackRuntime(child, f.bridge.store, f.start.run.id, f.token);
     assert.equal(await done(1), false); assert.equal(f.bridge.store.getRun(f.start.run.id).diagnostics?.runtime?.state, 'running');
+    child.stdin!.end('finish');
     assert.equal(await done(3000), true); assert.equal(f.bridge.store.getRun(f.start.run.id).diagnostics?.runtime?.exitCode, 7);
     const missing = spawn(join(f.root, 'not-an-executable'), [], { stdio: 'ignore' });
     const failed = trackRuntime(missing, f.bridge.store, f.start.run.id, f.token);

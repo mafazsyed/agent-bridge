@@ -196,13 +196,18 @@ test('detached work survives host exit; queued turns and retries dispatch once',
 test('cancellation stops the owned runtime; transport failure is uncertain, not silently retried', async () => {
   const f = await fixture();
   try {
-    const a = await f.command(['start'], { requestKey: 'cancel', cwd: f.root, prompt: 'fixture:delay' });
+    // Keep the fixture active until cancelled; a 1.5-second completion races Windows process probes.
+    const a = await f.command(['start'], { requestKey: 'cancel', cwd: f.root, prompt: 'fixture:hang fixture:slow-cancel' });
+    let started = false;
     for (let i = 0; i < 50; i++) {
-      if ((await f.command(['get', a.run.id])).events.some((e: any) => e.type === 'started')) break;
+      if ((await f.command(['get', a.run.id])).events.some((e: any) => e.type === 'started')) { started = true; break; }
       await delay(100);
     }
+    assert.equal(started, true, 'Exercise cancellation after the runtime starts');
     await f.command(['cancel', a.run.id]);
-    assert.equal((await f.getTerminal(a.run.id)).run.status, 'cancelled');
+    const cancelled = await f.getTerminal(a.run.id);
+    assert.equal(cancelled.run.status, 'cancelled');
+    assert.equal(cancelled.run.diagnostics.runtime.state, 'exited');
     const b = await f.command(['start'], { requestKey: 'crash', conversationId: a.conversation.id, prompt: 'fixture:crash' });
     const failed = await f.getTerminal(b.run.id);
     assert.equal(failed.run.status, 'unknown');

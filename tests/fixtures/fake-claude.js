@@ -8,7 +8,7 @@ const value = flag => args.find(arg => arg.startsWith(flag + '='))?.slice(flag.l
 const session = (args.includes('--fork-session') ? value('--session-id') : value('--resume')) || value('--session-id') || randomUUID();
 const model = value('--model');
 let permissionMode = value('--permission-mode') ?? 'default';
-let resultSent = false, inputEnded = false, flushOnEof = false;
+let resultSent = false, inputEnded = false, flushOnEof = false, slowCancel = false;
 const flush = () => {
   if (!flushOnEof || !resultSent || !inputEnded) return;
   setTimeout(() => {
@@ -18,7 +18,7 @@ const flush = () => {
 };
 const send = event => process.stdout.write(JSON.stringify(event) + '\n');
 const input = createInterface({ input: process.stdin });
-input.on('close', () => { inputEnded = true; flush(); });
+input.on('close', () => { inputEnded = true; flush(); if (slowCancel) setTimeout(() => process.exit(0), 4000); });
 if (process.env.AGENT_BRIDGE_FIXTURE_LOG) appendFileSync(process.env.AGENT_BRIDGE_FIXTURE_LOG, JSON.stringify({ pid: process.pid, session, args: args.filter((_, i) => args[i - 1] !== '--append-system-prompt') }) + '\n');
 input.on('line', line => {
   const event = JSON.parse(line);
@@ -37,6 +37,8 @@ input.on('line', line => {
   if (event.type !== 'user') return;
   const text = typeof event.message.content === 'string' ? event.message.content : JSON.stringify(event.message.content);
   flushOnEof = text.includes('fixture:flush');
+  slowCancel = text.includes('fixture:slow-cancel');
+  if (slowCancel) process.on('SIGTERM', () => {}); // Emulate the SDK's longer Windows EOF grace on every host.
   send({ type: 'system', subtype: 'init', session_id: session, model, ...(text.includes('fixture:effort') ? { effort: 'medium' } : {}), tools: [], mcp_servers: [], permissionMode, claude_code_version: '2.1.302', uuid: randomUUID() });
   if (text.includes('fixture:crash')) { setTimeout(() => process.exit(2), 100); return; }
   const done = () => {

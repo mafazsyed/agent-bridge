@@ -256,7 +256,9 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     dispatch(); endInput(); abort.signal.removeEventListener('abort', closeOnAbort);
     let closeFailed = false;
     try { q.close(); } catch { closeFailed = true; } finally {
-      const exited = await waitForExit?.();
+      // The SDK gives Windows 2 seconds of EOF grace plus 5 seconds before its kill fallback.
+      // Keep the ledger open through that window so cancellation records the real child exit.
+      const exited = await waitForExit?.(10_000);
       saveDiagnostics(store, run.id, token, { shutdown: !closeFailed && drained && exited ? 'clean' : 'unverified',
         transcript: !dispatched ? 'not_started' : !closeFailed && drained && result && exited ? 'runtime_reported' : 'unverified' });
     }
