@@ -1,3 +1,7 @@
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { trackRuntime } from './runtime-process.js';
+import { stopReason, saveDiagnostics } from './run-diagnostics.js';
 import { query, getSessionMessages, type Options, type SDKResultMessage, type PermissionResult, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from './store.js';
@@ -26,7 +30,9 @@ export function verifyClaudePermissionMode(response: unknown, expected: ClaudePe
 
 export function errorCode(text: string): string {
   if (/not authenticated|authentication failed|authentication required|login required|oauth.*expired/i.test(text)) return 'auth_required';
-  if (/rate.?limit|(?:usage|session|weekly|daily) limit|quota|overloaded|capacity/i.test(text)) return 'rate_limited';
+  if (/(?:usage|session|weekly|daily) limit|hit your limit|quota|allowance|usageLimitExceeded|sessionBudgetExceeded/i.test(text)) return 'allowance_exhausted';
+  if (/overloaded|capacity/i.test(text)) return 'capacity';
+  if (/rate.?limit/i.test(text)) return 'rate_limited';
   if (/no conversation found|session.*not found/i.test(text)) return 'session_not_found';
   return 'runtime_error';
 }
@@ -98,7 +104,28 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
       store.appendEvent(run.id, 'tool', { tool: input.tool_name, decision: native && decision.kind !== 'deny' ? 'native' : decision.kind });
       if (native && decision.kind !== 'deny') return {};
       return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision.kind, permissionDecisionReason: decision.reason } };
-    }] }] },
+    }] }],
+      PostToolUse: [{ hooks: [async input => {
+        if (input.hook_event_name !== 'PostToolUse' || input.tool_name !== 'Bash') return {};
+        const command = (input.tool_input as { command?: unknown })?.command;
+        const response = input.tool_response as { exitCode?: unknown } | null;
+        // This is a tool completion, not proof that a check passed. Do not retain arbitrary stdout/secrets.
+        if (typeof command === 'string') store.appendEvent(run.id, 'command_result', {
+          tool: input.tool_name, command: command.slice(0, 4000), truncated: command.length > 4000,
+          status: 'tool_completed', exitCode: Number.isInteger(response?.exitCode) ? response!.exitCode : null,
+        }, `claude-command:${input.tool_use_id}:completed`);
+        return {};
+      }] }],
+      PostToolUseFailure: [{ hooks: [async input => {
+        if (input.hook_event_name !== 'PostToolUseFailure' || input.tool_name !== 'Bash') return {};
+        const command = (input.tool_input as { command?: unknown })?.command;
+        if (typeof command === 'string') store.appendEvent(run.id, 'command_result', {
+          tool: input.tool_name, command: command.slice(0, 4000), truncated: command.length > 4000,
+          status: input.is_interrupt ? 'interrupted' : 'tool_failed', exitCode: null,
+        }, `claude-command:${input.tool_use_id}:failed`);
+        return {};
+      }] }],
+    },
     canUseTool: async (tool, input, context) => {
       const decision = policy.evaluate(tool, input);
       if (decision.kind === 'deny') return { behavior: 'deny', message: decision.reason };
@@ -123,6 +150,14 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
   let forkCompacted = false;
   let runtimeVersion: string | undefined;
   if (abort.signal.aborted || store.getRun(run.id).cancelRequested) throw new BridgeError('cancelled', 'Run stopped before startup.');
+  let waitForExit: ((timeoutMs?: number) => Promise<boolean>) | undefined;
+  options.spawnClaudeCodeProcess = input => {
+    const child = spawn(input.command, input.args, { cwd: input.cwd, env: input.env, signal: input.signal, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stderr.resume(); // Do not relay runtime authentication/configuration diagnostics.
+    waitForExit = trackRuntime(child, store, run.id, token);
+    return child;
+  };
+  saveDiagnostics(store, run.id, token, { dispatch: 'not_sent', shutdown: 'pending', transcript: 'not_started' });
   const q = open({ prompt: streamed ? prompt : run.prompt, options });
   // A completed native turn still needs its bounded transcript flush, even if
   // Stop or the worker deadline races the result's delivery.
@@ -130,6 +165,8 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
   abort.signal.addEventListener('abort', closeOnAbort, { once: true });
   if (abort.signal.aborted) closeOnAbort();
   let dispatched = !streamed;
+  if (dispatched) saveDiagnostics(store, run.id, token, { dispatch: 'sent', transcript: 'unverified' });
+  let drained = false;
   let drainDeadline: number | undefined;
   try {
     if (streamed) {
@@ -157,6 +194,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
         })(), stopped]);
       } finally { clearTimeout(setupTimer); abort.signal.removeEventListener('abort', cancelSetup); }
       if (abort.signal.aborted || store.getRun(run.id).cancelRequested || !store.heartbeat(run.id, token)) throw new BridgeError('cancelled', 'Run stopped before dispatch.');
+      saveDiagnostics(store, run.id, token, { dispatch: 'sent', transcript: 'unverified' });
       verified = true; dispatched = true; dispatch();
     }
     const iterator = q[Symbol.asyncIterator]();
@@ -171,7 +209,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
         store.appendEvent(run.id, 'warning', { code: 'session_shutdown_timeout', message: 'Claude returned a result but did not finish saving and exiting. Inspect the session before continuing.' });
         throw new BridgeError('unknown_outcome', 'Claude did not finish session shutdown after its result; the saved transcript may be incomplete.');
       }
-      if (item.done) break;
+      if (item.done) { drained = true; break; }
       const event = item.value;
       if (event.type === 'system' && event.subtype === 'init') {
         if (event.session_id !== conversation.id) throw new BridgeError('session_identity_changed', 'Runtime returned a different conversation; refusing silent replacement.');
@@ -187,12 +225,19 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
         store.appendEvent(run.id, 'permission_mode', { applied: event.permissionMode });
         if (event.permissionMode !== policy.permissionMode) { noteModeMismatch(event.permissionMode); throw new BridgeError('unknown_outcome', 'Claude changed permission mode during the turn; further tools are refused.'); }
       } else if (event.type === 'assistant') {
-        for (const block of event.message.content) {
-          if (block.type === 'text') store.appendEvent(run.id, 'text', { text: block.text.slice(0, 16_000), truncated: block.text.length > 16_000 });
+        for (const [index, block] of event.message.content.entries()) {
+          if (block.type === 'text') {
+            // SDK frames can share message.id while containing different blocks. Use the frame UUID.
+            const messageKey = event.uuid ? `claude:${event.uuid}:${index}` : undefined;
+            const key = messageKey && `${messageKey}:${createHash('sha256').update(block.text).digest('hex')}`;
+            store.appendEvent(run.id, 'text', { text: block.text.slice(0, 16_000), truncated: block.text.length > 16_000, messageKey }, key);
+          }
         }
       } else if (event.type === 'result') {
         if (event.session_id !== conversation.id) throw new BridgeError('session_identity_changed', 'Result belongs to a different conversation.');
         result = event;
+        const nativeCode = resultErrorCode(event);
+        saveDiagnostics(store, run.id, token, { terminalResultAt: Date.now(), nativeCode, stopReason: stopReason(nativeCode, !event.is_error) });
         saveUsage(store, run.id, token, claudeUsage(event, runtimeVersion));
         store.appendEvent(run.id, 'result', { subtype: event.subtype, isError: event.is_error, durationMs: event.duration_ms, permissionDenials: event.permission_denials?.length ?? 0 });
         // EOF lets the CLI flush its transcript and exit normally. Do not force-kill
@@ -207,7 +252,16 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
       `${fork && !native ? 'Claude could not prepare the fork' : 'Claude could not apply the selected permissions'} before dispatch: ${String(error).slice(0, 2000)}`);
     if (streamed && result) throw new BridgeError('unknown_outcome', 'Claude returned a result but its session shutdown failed. Inspect the saved transcript before continuing.', completedText);
     if (!result) throw new BridgeError('unknown_outcome', `Runtime ended without a trustworthy completion: ${String(error).slice(0, 2000)}`);
-  } finally { dispatch(); endInput(); abort.signal.removeEventListener('abort', closeOnAbort); q.close(); }
+  } finally {
+    dispatch(); endInput(); abort.signal.removeEventListener('abort', closeOnAbort);
+    let closeFailed = false;
+    try { q.close(); } catch { closeFailed = true; } finally {
+      const exited = await waitForExit?.();
+      saveDiagnostics(store, run.id, token, { shutdown: !closeFailed && drained && exited ? 'clean' : 'unverified',
+        transcript: !dispatched ? 'not_started' : !closeFailed && drained && result && exited ? 'runtime_reported' : 'unverified' });
+    }
+    if (closeFailed) throw new BridgeError('unknown_outcome', 'Claude runtime cleanup failed; inspect the saved session before continuing.', result && ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000));
+  }
   if (modeMismatch) throw new BridgeError('unknown_outcome', 'Claude reported a different permission mode in a tool hook. Inspect the saved conversation before continuing.', result && ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000));
   if (!result) throw new BridgeError('unknown_outcome', 'Runtime exited without a terminal result. Inspect the saved conversation before retrying.');
   if (fork) {

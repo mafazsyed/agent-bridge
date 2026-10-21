@@ -161,3 +161,23 @@ test('Codex never policy does not forward an unexpected native escalation', asyn
     assert.equal(f.bridge.store.events(f.run.id).some(e => e.type === 'needs_input'), false);
   } finally { f.clean(); }
 });
+
+for (const [native, reason] of [['usageLimitExceeded', 'allowance_exhausted'], ['sessionBudgetExceeded', 'allowance_exhausted'], ['rateLimitExceeded', 'throttled'], ['serverOverloaded', 'capacity']]) test(`Codex persists native stop evidence: ${native}`, async () => {
+  const f = setup(`stop-${native}`);
+  try {
+    const result = await runCodex(f.settings, f.bridge.store, f.run, f.conversation, 'fixture', f.abort, f.open);
+    assert.equal(result.success, false);
+    const diagnostics = f.bridge.store.getRun(f.run.id).diagnostics!;
+    assert.equal(diagnostics.stopReason, reason); assert.equal(diagnostics.nativeCode, native); assert.equal(diagnostics.runtime?.state, 'exited');
+    assert.equal(diagnostics.shutdown, 'clean'); assert.equal(diagnostics.transcript, 'runtime_reported');
+  } finally { f.clean(); }
+});
+
+test('diagnostics storage failure cannot mask a Codex result or prevent runtime exit', async () => {
+  const f = setup('basic'); let client: CodexClient | undefined;
+  try {
+    f.bridge.store.recordDiagnostics = () => { throw new Error('Disk unavailable'); };
+    const result = await runCodex(f.settings, f.bridge.store, f.run, f.conversation, 'fixture', f.abort, () => { client = f.open(); return client; });
+    assert.equal(result.success, true); assert.ok(client?.child.exitCode !== null || client?.child.signalCode !== null);
+  } finally { f.clean(); }
+});

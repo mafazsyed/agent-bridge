@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { trackRuntime } from './runtime-process.js';
+import { stopReason, saveDiagnostics } from './run-diagnostics.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -18,7 +21,9 @@ function inside(root: string, path: string) { const p = relative(root, resolve(r
 function terminalError(error: any): string {
   const info = error?.codexErrorInfo;
   if (info === 'unauthorized') return 'auth_required';
-  if (['usageLimitExceeded', 'rateLimitExceeded', 'serverOverloaded', 'sessionBudgetExceeded'].includes(info)) return 'rate_limited';
+  if (['usageLimitExceeded', 'sessionBudgetExceeded'].includes(info)) return 'allowance_exhausted';
+  if (info === 'rateLimitExceeded') return 'rate_limited';
+  if (info === 'serverOverloaded') return 'capacity';
   return typeof info === 'string' ? info : 'runtime_error';
 }
 export function verifySandbox(response: any, mode: Conversation['mode'], cwd: string, permissions?: CodexPermissionOptions | null) {
@@ -104,7 +109,9 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
   if (!settings.codexExecutable) throw new BridgeError('cli_missing', 'Codex executable is missing. Set AGENT_BRIDGE_CODEX_PATH.');
   const selected = codexPermissionOptions(conversation.mode, run.permissions);
   const fork = !conversation.sessionInitialized ? conversation.fork : null;
+  saveDiagnostics(store, run.id, token, { dispatch: 'not_sent', shutdown: 'pending', transcript: 'not_started' });
   const client = open(settings.codexExecutable, conversation.cwd);
+  const waitForExit = client.child ? trackRuntime(client.child, store, run.id, token) : undefined;
   let threadId: string | null = conversation.nativeId ?? null;
   let turnId: string | null = null; let dispatched = false; let finished = false;
   let usage: RunUsage | null = null;
@@ -131,8 +138,8 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
     if (method === 'item/fileChange/patchUpdated') permissions.fileItems.set(p.itemId, p.changes);
     if (method === 'item/completed') {
       const item = p.item;
-      if (item?.type === 'agentMessage') { messages.set(item.id, { text: item.text, phase: item.phase }); store.appendEvent(run.id, 'text', { text: item.text.slice(0, 16_000), truncated: item.text.length > 16_000 }); }
-      else if (item?.type === 'commandExecution' || item?.type === 'fileChange') store.appendEvent(run.id, 'tool', { tool: item.type, itemId: item.id, status: item.status, ...(item.type === 'commandExecution' ? { command: item.command, cwd: item.cwd } : {}), ...(item.exitCode == null ? {} : { exitCode: item.exitCode }) });
+      if (item?.type === 'agentMessage') { messages.set(item.id, { text: item.text, phase: item.phase }); store.appendEvent(run.id, 'text', { text: item.text.slice(0, 16_000), truncated: item.text.length > 16_000, messageKey: `codex:${eventTurn}:${item.id}` }, `codex:${eventTurn}:${item.id}:${createHash('sha256').update(item.text).digest('hex')}`); }
+      else if (item?.type === 'commandExecution' || item?.type === 'fileChange') store.appendEvent(run.id, 'tool', { tool: item.type, itemId: item.id, status: item.status, ...(item.type === 'commandExecution' ? { command: item.command, cwd: item.cwd } : {}), ...(item.exitCode == null ? {} : { exitCode: item.exitCode }) }, `codex-tool:${eventTurn}:${item.id}`);
     }
     if (method === 'turn/completed') resolveTerminal(p);
   };
@@ -217,6 +224,7 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
     store.appendEvent(run.id, 'started', { runtime: 'codex', model: response.model, effortRequested: run.effort, effortApplied: effort, effortReported: true, sessionId: threadId, permissionsRequested: run.permissions ?? null, sandbox: response.sandbox, approvalPolicy: response.approvalPolicy, approvalsReviewer: response.approvalsReviewer,
       ...(fork ? { forkTurnPinned: Boolean(fork.turnId) } : {}) });
     if (abort.signal.aborted || store.getRun(run.id).cancelRequested || !store.heartbeat(run.id, token)) throw new BridgeError('cancelled', 'Run stopped before dispatch.');
+    saveDiagnostics(store, run.id, token, { dispatch: 'sent', transcript: 'unverified' });
     dispatched = true; // From here an unacknowledged write may have reached the model. Never retry it.
     const started = await client.request('turn/start', { threadId, model: model.model, effort, approvalPolicy: params.approvalPolicy, approvalsReviewer: params.approvalsReviewer,
       sandboxPolicy: response.sandbox, input: [{ type: 'text', text: run.prompt, text_elements: [] }] });
@@ -230,6 +238,8 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
     const entries = [...messages.values()];
     const text = (entries.findLast(m => m.phase === 'final_answer') ?? entries.at(-1))?.text ?? '';
     const status = completion.turn.status;
+    const nativeCode = status === 'completed' ? null : status === 'interrupted' ? 'cancelled' : terminalError(completion.turn.error);
+    saveDiagnostics(store, run.id, token, { terminalResultAt: Date.now(), nativeCode: typeof completion.turn.error?.codexErrorInfo === 'string' ? completion.turn.error.codexErrorInfo : nativeCode, stopReason: stopReason(nativeCode, status === 'completed'), transcript: 'runtime_reported' });
     const reportedUsage = usage as RunUsage | null; // Assigned by the notification callback.
     if (reportedUsage && status === 'completed') saveUsage(store, run.id, token, { ...reportedUsage, status: 'reported' });
     store.appendEvent(run.id, 'result', { runtime: 'codex', status, turnId });
@@ -242,6 +252,8 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
   } finally {
     clearTimeout(interruptTimer); abort.signal.removeEventListener('abort', interrupt);
     await client.close();
+    const exited = await waitForExit?.();
+    saveDiagnostics(store, run.id, token, { shutdown: exited ? 'clean' : 'unverified' });
     if (conversation.mode === 'write') {
       try {
         const paths = execFileSync('git', ['--no-optional-locks', 'status', '--porcelain', '-uall'], { cwd: conversation.cwd, encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });

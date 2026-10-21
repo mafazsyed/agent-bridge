@@ -65,7 +65,7 @@ test('runtime schemas reject cross keys, unknown aliases, incomplete granular po
 
 async function runFixture(permissions: RuntimePermissions | null, work: (options: Options, f: ReturnType<typeof setup>, runId: string) => Promise<void>, override: {
   applied?: string; initMode?: string; setError?: boolean; autoSupported?: boolean; unknownModel?: boolean; hooksApplied?: boolean;
-  setupHang?: 'initialize' | 'models' | 'mode' | 'reinitialize'; cancelSetup?: boolean; drainHang?: boolean; abortDuringDrain?: boolean; failedResult?: boolean; drainError?: boolean;
+  setupHang?: 'initialize' | 'models' | 'mode' | 'reinitialize'; cancelSetup?: boolean; drainHang?: boolean; abortDuringDrain?: boolean; failedResult?: boolean; drainError?: boolean; closeError?: boolean;
 } = {}) {
   const f = setup();
   const submitted = f.bridge.start({ requestKey: randomUUID(), prompt: 'fixture', cwd: f.root });
@@ -87,7 +87,7 @@ async function runFixture(permissions: RuntimePermissions | null, work: (options
       supportedModels: async () => { await control('models'); return [{ value: override.unknownModel ? 'other-model' : run.model, supportsAutoMode: override.autoSupported ?? true }]; },
       setPermissionMode: async (mode: string) => { await control('mode'); assert.equal(received, false); assert.equal(mode, selected); if (override.setError) throw new Error('organization denied'); },
       reinitialize: async () => { await control('reinitialize'); return { current_permission_mode: override.applied ?? selected, hooks_applied: override.hooksApplied ?? true }; },
-      close: () => { closed = true; },
+      close: () => { closed = true; if (override.closeError) throw new Error('Close failed'); },
       async *[Symbol.asyncIterator]() {
         const incoming = typeof input.prompt === 'string' ? null : input.prompt[Symbol.asyncIterator]();
         if (incoming) { const p = await incoming.next(); assert.equal(p.value.message.content, 'fixture'); }
@@ -217,4 +217,27 @@ for (const outcome of ['unsupported', 'missing', 'denied']) test(`Codex requirem
   });
   if (outcome === 'denied') await assert.rejects(promise, /Access denied/);
   else { const result = await promise; assert.equal(result.requirements, null); assert.equal(result.approvalsReviewer[0]!.allowedByRequirements, null); }
+});
+
+test('Claude command evidence distinguishes completion, explicit exit code and failure without retaining output', async () => {
+  await runFixture(null, async (options, f, runId) => {
+    const post = options.hooks!.PostToolUse![0]!.hooks[0]!, fail = options.hooks!.PostToolUseFailure![0]!.hooks[0]!;
+    const base = { session_id: 'fixture', transcript_path: 'fixture', cwd: f.root, tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_use_id: 'check' };
+    await post({ ...base, hook_event_name: 'PostToolUse', tool_response: { stdout: 'SECRET' } }, 'check', { signal: new AbortController().signal });
+    await post({ ...base, hook_event_name: 'PostToolUse', tool_response: { stdout: 'SECRET' } }, 'check', { signal: new AbortController().signal });
+    await post({ ...base, tool_use_id: 'exit-check', hook_event_name: 'PostToolUse', tool_response: { exitCode: 1 } }, 'exit-check', { signal: new AbortController().signal });
+    await fail({ ...base, tool_use_id: 'failure', hook_event_name: 'PostToolUseFailure', error: 'SECRET' }, 'failure', { signal: new AbortController().signal });
+    const commands = f.bridge.store.events(runId).filter(e => e.type === 'command_result');
+    assert.equal(commands.length, 3); assert.equal((commands[0]!.data as any).exitCode, null);
+    assert.equal((commands[1]!.data as any).exitCode, 1); assert.equal((commands[2]!.data as any).status, 'tool_failed');
+    assert.equal(JSON.stringify(commands).includes('SECRET'), false);
+  });
+});
+
+test('Claude cleanup failure retains the completed result and reports uncertainty', async () => {
+  await assert.rejects(runFixture(null, async () => {}, { closeError: true }), { code: 'unknown_outcome', completedResult: 'done' });
+});
+test('diagnostics storage failure cannot mask a Claude result or prevent its drain', async () => {
+  const done = await runFixture(null, async (_options, f) => { f.bridge.store.recordDiagnostics = () => { throw new Error('Disk unavailable'); }; });
+  assert.equal(done.drained, true); assert.equal(done.closed, true);
 });

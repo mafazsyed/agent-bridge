@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { Bridge, startSchema, forkSchema, publicRun, requireTopLevel } from './service.js';
+import { Bridge, startSchema, forkSchema, handoffSchema, publicRun, requireTopLevel } from './service.js';
 import { BridgeError } from './types.js';
 import { createModelDiscovery } from './models.js';
 import { discoverCodexModels } from './codex-models.js';
@@ -45,6 +45,22 @@ export function createMcpServer(bridge: Bridge) {
     description: 'Create a new conversation from an idle source whose latest run succeeded, then send its first prompt. Same runtime and workspace mode; model, effort and permissions default to the source conversation settings. Write forks snapshot tracked and nonignored untracked files into a separate worktree; parent files stay unchanged and approval decisions are not copied. Source follow-ups wait until native history is copied. Reuse requestKey only for the exact same submission; failed uninitialized forks require a new fork after inspection. No active-turn or earlier-message forking yet.',
     inputSchema: forkSchema, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, args => answer(() => bridge.fork(args)));
+  server.registerTool('get_progress', {
+    description: 'Concise run status, preserved stop reason, live worker/runtime exit evidence, recovery advice, last workspace checkpoint and host-reported handoff. Distinguishes activity and agent claims from recorded command results. No inference. A terminal status alone does not prove safe takeover.',
+    inputSchema: { runId: id }, annotations: { readOnlyHint: true },
+  }, args => answer(() => bridge.progress(args.runId)));
+  server.registerTool('get_transcript', {
+    description: 'Read a bounded chronological activity page. Exact duplicate native messages are suppressed; newer revisions have the same messageKey and replace earlier presentation. Follow nextCursor until mayHaveMore is false. Raw evidence is retained in get_run. Does not read native credential files or reconstruct missing/pruned history.',
+    inputSchema: { runId: id, afterSeq: cursor, limit: z.number().int().min(1).max(100).default(50) }, annotations: { readOnlyHint: true },
+  }, args => answer(() => bridge.transcript(args.runId, args.afterSeq, args.limit)));
+  server.registerTool('capture_checkpoint', {
+    description: 'Observe and save this run workspace branch, HEAD and bounded dirty-file list using read-only Git. Does not commit, reset, run tests or make a running workspace safe to take over. Captures current state, which may include later work; timestamps and recovery evidence are returned.',
+    inputSchema: { runId: id }, annotations: { readOnlyHint: false, destructiveHint: false },
+  }, args => answer(() => bridge.checkpoint(args.runId)));
+  server.registerTool('record_handoff', {
+    description: 'Save a host-reported summary, unfinished work and claimed checks for a run. Checks may reference retained event sequence numbers from that run. Claims never become independent verification or clear an uncertain outcome. Does not dispatch work or approve actions.',
+    inputSchema: handoffSchema, annotations: { readOnlyHint: false, destructiveHint: false },
+  }, args => answer(() => bridge.handoff(args)));
   server.registerTool('get_run', {
     description: 'Read task status, result, recorded native usage, pending questions/approvals and a page of progress. run.usage is null when unreported; cumulative totals are snapshots, never sum them across resumed runs. Persist nextCursor; mayHaveMore means another page is available. succeeded describes the runtime result, not an independent verification of its claims.',
     inputSchema: { runId: id, afterSeq: cursor }, annotations: { readOnlyHint: true },

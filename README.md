@@ -105,7 +105,11 @@ Ask your MCP-enabled agent to delegate a review to Opus. It can use:
 | `get_account_limits` | Read current native account quota windows without inference |
 | `start_run` | Start a job or queue a follow-up on a conversation |
 | `fork_conversation` | Branch an idle conversation into independent native history and send its first prompt |
-| `get_run` | Read status, results, pending input and progress pages |
+| `get_run` | Read status, results, pending input and raw event pages |
+| `get_progress` | Concise progress, stop reason, exit evidence and handoff readiness |
+| `get_transcript` | Page through normalized activity without repeated native frames |
+| `capture_checkpoint` | Save a read-only Git snapshot: branch, commit and dirty files |
+| `record_handoff` | Save a host-reported summary, checks and unfinished work |
 | `wait_run` | Wait up to 50 seconds for changes |
 | `cancel_run` | Request cancellation; poll until terminal |
 | `answer_permission` | Approve or deny one command, or answer a question |
@@ -277,10 +281,42 @@ The limits probe starts no inference, consumes no job slot, changes no conversat
 
 - A **conversation** retains its runtime, native session identity, workspace and mode. It survives completed jobs and can be resumed in that runtime's CLI. Codex's `nativeId` is distinct from the bridge conversation ID.
 - A **run** is one submitted turn. Follow-ups queue in insertion order; only one turn runs per conversation.
-- A detached **worker process** owns a run and updates its lease. Closing the MCP connection does not normally stop the worker. At most one model task runs at a time by default.
+- A detached **worker process** owns a run and updates its lease. Closing the MCP connection does not normally stop the worker. Independent conversations run concurrently by default; set `AGENT_BRIDGE_MAX_ACTIVE` to bound concurrency.
 - `needs_input` means a real pending question or permission request. A five-minute deadline expires unanswered requests. Cancellation and expired answers cannot authorize later execution.
 - `succeeded` means the runtime returned a successful terminal result. Verify its claims against files/tests; it is not an independent correctness verdict.
 - A stale worker or stream that ends without a trustworthy result produces `unknown`. Nothing is automatically replayed. Inspect the saved conversation/worktree, then explicitly acknowledge uncertainty if continuing.
+
+For a quick answer to “what happened, and can I continue?”, use `get_progress({"runId":"…"})` or `node dist/cli.js progress RUN_ID`. It returns a short result preview and recent activity, with event cursors pointing to the full evidence. `recovery` keeps **why the runtime stopped** separate from **whether cleanup and the saved session were confirmed**:
+
+| Field | Meaning |
+| --- | --- |
+| `stopReason` | `completed`, `allowance_exhausted`, `throttled`, `capacity`, `turn_limit`, `budget_limit`, `cancelled`, `timeout`, `authentication`, `runtime_failure` or `uncertain` |
+| `worker` / `runtime` | `running`, `exited`, `not_started` or `unverified`, based on the owned process and its start identity |
+| `shutdown` / `transcript` | Whether shutdown completed and a terminal session result was reported; a process exit alone is insufficient |
+| `readyForHandoff` | This run's owned processes have stopped and there are no other active runs in its Bridge conversation. An uncertain transcript still requires inspection |
+| `readyForFollowUp` | The current evidence supports a deliberate follow-up now; this is not a correctness or side-effect guarantee |
+| `nextAction` | `wait`, `inspect`, `retry_when_available` or `continue` |
+
+For example, an exhausted allowance followed by a failed transcript flush remains `status: "unknown"` with `stopReason: "allowance_exhausted"` and `nextAction: "inspect"`. The cause is retained; Bridge never silently retries the prompt or bypasses the existing `acknowledgeUncertain` requirement. Account availability is not inferred from a run's error: use `get_account_limits` for current reported limits. A native success followed by failed cleanup is likewise not a clean continuation. Older receipts have no new process evidence and remain unverified; older `rate_limited` errors cannot reliably distinguish quota from throttling.
+
+At worker completion, Bridge attempts a bounded, read-only Git checkpoint. `capture_checkpoint` can refresh it later. It contains the observed branch, HEAD, up to 200 dirty paths and a timestamp. Missing Git, timeout or capture failure is **unknown**, never a clean worktree. The snapshot can include changes from other work and does not lock the directory, freeze a revision or commit anything.
+
+Use `record_handoff` (CLI: `handoff RUN_ID`, JSON on stdin) to preserve explicit unfinished work and check results:
+
+```json
+{
+  "runId": "<run UUID>",
+  "summary": "Parser change is ready; the integration failure still needs investigation.",
+  "unfinishedWork": ["Investigate the integration failure"],
+  "checks": [{"description":"npm test", "result":"failed", "evidenceSeq":42}]
+}
+```
+
+The whole handoff is labelled `host_reported`. An optional evidence sequence must belong to that run. Agent text is a claim, tool activity is an observation, and even a recorded command exit code does not prove the task is correct. Claude command completions without an explicit exit code retain `null`; Bridge does not guess a passing test from prose. Arbitrary command output is not added to these summaries. Checkpoint and handoff content is removed by `prune`.
+
+`get_transcript` / `transcript RUN_ID [CURSOR]` returns chronological, bounded activity pages. Exact repeats with the same native identity and content are suppressed; distinct equal messages remain separate. Later versions of a message retain `messageKey`, so a streaming reader can replace its earlier presentation. `get_run` retains the stored raw revisions. This is Bridge's captured activity, not a full reconstruction of native session history; missing or pruned content is not recreated.
+
+Process evidence is a point-in-time observation of Bridge's worker and native runtime, not a lock on external clients or proof that every command's external side effect has stopped. Inspect uncertain outcomes before taking over; avoid running the same native session outside Bridge concurrently.
 
 A stale heartbeat is checked against the worker's PID and start identity before fencing it, so sleep does not by itself invalidate a living worker. Inconclusive process probes defer reconciliation; workers must establish their own start identity before launching a runtime. Run deadlines still include time asleep. An abort that does not settle within 60 seconds is recorded as an uncertain outcome, then the worker exits. If the host died before launching a worker, reconciliation marks the unstarted job `failed/worker_start_lost` after two minutes. Repeating the original key returns that failure; submit a **new** key to retry this known unstarted job. Cancellation of an unstarted job is immediate.
 
@@ -297,9 +333,9 @@ There is no exactly-once execution guarantee, no promise that work survives a ma
 | `AGENT_BRIDGE_CODEX_PATH` | Native `codex` / `codex.exe`; standard npm native binary discovery on Windows |
 | `AGENT_BRIDGE_MAX_ACTIVE` | `unlimited` (or a positive safe integer) |
 
-The local SQLite ledger stores prompts, results, progress, permission input and workspace paths. It may contain sensitive task content. State directory and file modes are private on POSIX; Windows access depends on the user's filesystem ACLs. Point the state variable only at a dedicated directory: the bridge applies private directory permissions. The bridge adds no telemetry and does not log authentication environment values. Claude has its own data handling and authentication policies.
+The local SQLite ledger stores prompts, results, progress, command descriptions, checkpoints, handoff notes, permission input and workspace paths. It may contain sensitive task content. State directory and file modes are private on POSIX; Windows access depends on the user's filesystem ACLs. Point the state variable only at a dedicated directory: the bridge applies private directory permissions. The bridge adds no telemetry and does not log authentication environment values. Claude has its own data handling and authentication policies.
 
-`node dist/cli.js prune 30` removes bridge task content older than 30 days, retaining small idempotency receipts, conversation identities and fork lineage. It does not delete worktrees or native transcripts. SQLite page reclamation is not secure erasure.
+`node dist/cli.js prune 30` removes bridge task content older than 30 days, retaining small idempotency receipts, conversation identities and fork lineage. It does not delete worktrees or native transcripts. SQLite page reclamation is not secure erasure. Schema 6 adds the reporting fields without changing run IDs or idempotency keys. Let active jobs finish before updating and restart host MCP connections afterwards; older binaries cannot open a ledger upgraded to schema 6.
 
 To retire a write conversation, first confirm it has no queued, running or waiting runs, inspect its worktree and preserve or integrate any wanted changes. From the source repository, use `git worktree remove "<saved cwd>"`, then `git branch -d "<saved branch>"`. These commands refuse dirty worktrees or unmerged branches; inspect a refusal instead of forcing deletion. Do not resume a retired conversation. Its ledger record and small readiness receipt remain; automatic worktree retirement is not implemented yet.
 
@@ -314,11 +350,14 @@ AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-control.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-codex.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-claude-to-codex.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-fork.ts
+AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-progress.ts
 ```
 
 The runtime prototype verifies SDK → CLI → SDK continuation with the same UUID and retained context. The live acceptance script checks review restrictions, queued follow-ups, isolated edits and a specific harmless command approval. Temporary evidence is kept under ignored `.local/`.
 
 The fork script uses twelve short turns across Claude and Codex to check copied context, independent follow-ups, source preservation and worktree snapshots through stdio MCP. Set `AGENT_BRIDGE_LIVE_RUNTIME=claude` or `codex` to test only one runtime (six turns). It prints the isolated temporary evidence directory; do not commit that directory or its transcripts.
+
+The progress script exercises completion, owned-process exit, checkpoints, transcript reads, handoff notes and context-preserving continuation through stdio MCP. It uses four short turns; set `AGENT_BRIDGE_LIVE_RUNTIME=claude` or `codex` for two turns. A quota failure is recorded as a failed live acceptance, not a successful completion test.
 
 See [validation](docs/validation.md) for the tested versions and coverage limits. The official Agent SDK is pinned; native Claude updates require re-running the compatibility probe. This is a source repository: npm package publication and plugin-directory submission are separate steps.
 

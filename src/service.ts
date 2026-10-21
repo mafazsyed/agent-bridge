@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { captureWorkspace } from './checkpoint.js';
+import { recovery, summarizeEvents } from './progress.js';
 import { Store, type CreateRunInput } from './store.js';
 import { BridgeError, CLAUDE_EFFORTS, NATIVE_DEFAULT, RUNTIMES, TERMINAL, isClaudeEffort, type Conversation, type Run, type Runtime, type StartInput, type ForkInput } from './types.js';
 import type { Config } from './config.js';
@@ -26,6 +28,11 @@ export const startSchema = z.object({
 export const forkSchema = startSchema.pick({
   requestKey: true, prompt: true, model: true, effort: true, permissions: true, timeoutSeconds: true, maxTurns: true,
 }).extend({ sourceConversationId: z.string().uuid() }).strict();
+export const handoffSchema = z.object({
+  runId: z.string().uuid(), summary: z.string().min(1).max(4000),
+  unfinishedWork: z.array(z.string().min(1).max(2000)).max(30).default([]),
+  checks: z.array(z.object({ description: z.string().min(1).max(1000), result: z.enum(['passed', 'failed', 'not_run', 'unknown']), evidenceSeq: z.number().int().positive().optional() }).strict()).max(30).default([]),
+}).strict();
 const DEFAULT_MAX_TURNS = 30;
 const executableFor = (settings: Config, runtime: Runtime) => runtime === 'codex' ? settings.codexExecutable : settings.executable;
 // A delegated runtime sets this for its children, so a delegated agent cannot fan out further delegations.
@@ -184,7 +191,43 @@ export class Bridge {
     this.reconcile();
     const run = this.store.getRun(runId);
     const events = this.store.events(runId, afterSeq, 50);
-    return { run: publicRun(run), conversation: this.store.getConversation(run.conversationId), permissions: this.store.pendingPermissions(runId), events, nextCursor: events.at(-1)?.seq ?? afterSeq, mayHaveMore: events.length === 50 };
+    return { run: publicRun(run), recovery: this.recovery(run), conversation: this.store.getConversation(run.conversationId), permissions: this.store.pendingPermissions(runId), events, nextCursor: events.at(-1)?.seq ?? afterSeq, mayHaveMore: events.length === 50 };
+  }
+  private recovery(run: Run) {
+    return recovery(run, undefined, undefined, this.store.activeConversationRuns(run.conversationId, run.id).map(r => r.id));
+  }
+  progress(runId: string) {
+    this.reconcile();
+    const run = this.store.getRun(runId), c = this.store.getConversation(run.conversationId);
+    const recent = this.store.recentEvents(runId, 12);
+    return { runId, conversationId: c.id, runtime: c.runtime, model: run.model, effort: run.effort, status: run.status,
+      recovery: this.recovery(run), workspace: run.checkpoint ?? null, handoff: run.handoff ?? null,
+      pendingInputs: this.store.pendingPermissions(runId).map(p => ({ id: p.id, tool: p.tool, reason: p.reason })),
+      activity: summarizeEvents(recent), history: { tool: 'get_transcript', runId, afterSeq: 0 },
+      result: run.result ? { preview: run.result.slice(0, 1000), truncated: run.result.length > 1000, tool: 'get_run', runId } : null,
+      note: 'Activity is recorded evidence; agent/host reports are claims. A command exit code alone does not verify task correctness. Workspace is a timestamped observation, not a lock or a diff of only this run.' };
+  }
+  transcript(runId: string, afterSeq = 0, limit = 50) {
+    this.store.getRun(runId);
+    limit = Math.min(100, Math.max(1, limit));
+    const events = this.store.transcript(runId, afterSeq, limit + 1);
+    const mayHaveMore = events.length > limit;
+    if (mayHaveMore) events.pop();
+    return { runId, events, nextCursor: events.at(-1)?.seq ?? afterSeq, mayHaveMore,
+      note: 'Message revisions share messageKey; replace their earlier presentation. Raw event evidence remains in get_run. Pruned history is unavailable.' };
+  }
+  async checkpoint(runId: string) {
+    requireTopLevel();
+    const run = this.store.getRun(runId);
+    const captured = await captureWorkspace(this.store.getConversation(run.conversationId).cwd);
+    this.store.recordCheckpoint(runId, captured);
+    return { workspace: captured, recovery: this.recovery(this.store.getRun(runId)) };
+  }
+  handoff(raw: z.input<typeof handoffSchema>) {
+    requireTopLevel();
+    const { runId, ...note } = handoffSchema.parse(raw);
+    this.store.recordHandoff(runId, { ...note, recordedAt: Date.now(), source: 'host_reported' });
+    return this.progress(runId);
   }
   async wait(runId: string, afterSeq = 0, seconds = 30) {
     const end = Date.now() + Math.min(50, Math.max(0, seconds)) * 1000;

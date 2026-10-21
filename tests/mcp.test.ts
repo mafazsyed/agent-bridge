@@ -17,12 +17,21 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
   try {
     await server.connect(b); await client.connect(a);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'fork_conversation', 'get_account_limits', 'get_run', 'list_conversations', 'list_models', 'list_permission_modes', 'list_runs', 'start_run', 'wait_run']);
+    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'capture_checkpoint', 'fork_conversation', 'get_account_limits', 'get_progress', 'get_run', 'get_transcript', 'list_conversations', 'list_models', 'list_permission_modes', 'list_runs', 'record_handoff', 'start_run', 'wait_run']);
     const start = await client.callTool({ name: 'start_run', arguments: { requestKey: 'mcp-fixture', prompt: 'Review', cwd: root } });
     assert.equal(start.isError, undefined);
     const payload = (start.structuredContent as any).result;
     const read = await client.callTool({ name: 'get_run', arguments: { runId: payload.run.id } });
     assert.equal((read.structuredContent as any).result.run.status, 'queued');
+    const progress = await client.callTool({ name: 'get_progress', arguments: { runId: payload.run.id } });
+    assert.equal((progress.structuredContent as any).result.recovery.nextAction, 'wait');
+    const transcript = await client.callTool({ name: 'get_transcript', arguments: { runId: payload.run.id } });
+    assert.deepEqual((transcript.structuredContent as any).result.events, []);
+    assert.equal((await client.callTool({ name: 'get_transcript', arguments: { runId: payload.run.id, limit: 101 } })).isError, true);
+    const checkpoint = await client.callTool({ name: 'capture_checkpoint', arguments: { runId: payload.run.id } });
+    assert.equal((checkpoint.structuredContent as any).result.workspace.status, 'unavailable');
+    const handoff = await client.callTool({ name: 'record_handoff', arguments: { runId: payload.run.id, summary: 'Waiting', unfinishedWork: ['Run review'] } });
+    assert.equal((handoff.structuredContent as any).result.handoff.source, 'host_reported');
     const invalid = await client.callTool({ name: 'start_run', arguments: { requestKey: 'oops', prompt: '' } });
     assert.equal(invalid.isError, true);
     const native = await client.callTool({ name: 'start_run', arguments: { requestKey: 'native-plan', prompt: 'Plan', cwd: root,

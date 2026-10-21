@@ -276,3 +276,31 @@ test('a native shutdown crash retains the completed answer with its uncertainty 
     assert.equal(result.run.usage.turn.tokens.output, 8);
   } finally { await f.cleanup(); }
 });
+
+for (const crash of [false, true]) test(`allowance result preserves cause and observed process shutdown through real SDK: crash=${crash}`, async () => {
+  const f = await fixture();
+  try {
+    const started = await f.command(['start'], { requestKey: 'allowance', cwd: f.root, prompt: `fixture:allowance fixture:frames ${crash ? 'fixture:flush-crash' : 'fixture:flush'}`, model: 'fixture-alias', permissions: { runtime: 'claude', permissionMode: 'default' } });
+    const done = await f.getTerminal(started.run.id);
+    assert.equal(done.run.status, crash ? 'unknown' : 'failed');
+    assert.equal(done.run.errorCode, crash ? 'unknown_outcome' : 'allowance_exhausted');
+    assert.equal(done.run.diagnostics.stopReason, 'allowance_exhausted');
+    assert.equal(done.run.diagnostics.runtime.state, 'exited');
+    assert.equal(done.run.diagnostics.runtime.exitCode, crash ? 2 : 0);
+    assert.equal(done.run.diagnostics.transcript, crash ? 'unverified' : 'runtime_reported');
+    let progress;
+    for (let n = 0; n < 40; n++) {
+      progress = await f.command(['progress', started.run.id]);
+      if (progress.recovery.readyForHandoff) break;
+      await delay(50);
+    }
+    assert.equal(progress.recovery.readyForHandoff, true);
+    assert.equal(progress.recovery.nextAction, crash ? 'inspect' : 'retry_when_available');
+    assert.equal(progress.workspace.status, 'unavailable', 'Non-Git workspace must never be called clean');
+    const transcript = await f.command(['transcript', started.run.id]);
+    assert.deepEqual(transcript.events.filter((e: any) => e.type === 'text').map((e: any) => e.data.text), ['first block', 'second block', 'first block']);
+    const handoff = await f.command(['handoff', started.run.id], { summary: 'Await provider reset', unfinishedWork: ['Continue review'], checks: [{ description: 'No validation ran', result: 'not_run' }] });
+    assert.equal(handoff.handoff.source, 'host_reported'); assert.equal(handoff.recovery.stopReason, 'allowance_exhausted');
+    assert.equal((await f.command(['checkpoint', started.run.id])).workspace.clean, null);
+  } finally { await f.cleanup(); }
+});

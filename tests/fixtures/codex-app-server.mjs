@@ -49,6 +49,9 @@ createInterface({ input: process.stdin }).on('line', async line => {
       notify('turn/started', { threadId, turn: { id: turnId, status: 'inProgress' } });
       if (scenario === 'early-complete') { complete(); reply(m, { turn: { id: turnId } }); break; }
       reply(m, { turn: { id: turnId } });
+      if (scenario.startsWith('stop-')) {
+        notify('turn/completed', { threadId, turn: { id: turnId, status: 'failed', items: [], error: { codexErrorInfo: scenario.slice(5) } } }); break;
+      }
       if (scenario.startsWith('usage')) {
         for (const [eventThread, eventTurn, total] of [[threadId, turnId, 80], ['foreign', turnId, 999], [threadId, 'foreign', 999]]) {
           notify('thread/tokenUsage/updated', { threadId: eventThread, turnId: eventTurn, tokenUsage: {

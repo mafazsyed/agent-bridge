@@ -1,3 +1,5 @@
+import type { RunDiagnostics } from './run-diagnostics.js';
+import type { WorkspaceCheckpoint, HandoffNote } from './checkpoint.js';
 import type { RuntimePermissions } from './permission-options.js';
 import type { RunUsage } from './usage.js';
 export type Mode = 'review' | 'write';
@@ -34,6 +36,9 @@ export interface Conversation {
   createdAt: number;
 }
 export interface Run {
+  diagnostics?: RunDiagnostics | null;
+  checkpoint?: WorkspaceCheckpoint | null;
+  handoff?: HandoffNote | null;
   usage?: RunUsage | null;
   // Resolved at submission, independent of subsequent queued follow-ups.
   permissions?: RuntimePermissions | null;

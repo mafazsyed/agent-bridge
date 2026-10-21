@@ -40,7 +40,13 @@ input.on('line', line => {
   send({ type: 'system', subtype: 'init', session_id: session, model, ...(text.includes('fixture:effort') ? { effort: 'medium' } : {}), tools: [], mcp_servers: [], permissionMode, claude_code_version: '2.1.302', uuid: randomUUID() });
   if (text.includes('fixture:crash')) { setTimeout(() => process.exit(2), 100); return; }
   const done = () => {
-    send({ type: 'result', subtype: 'success', session_id: text.includes('fixture:identity') ? randomUUID() : session, is_error: false, result: text.includes('fixture:delay') ? 'delayed fixture done' : 'fixture done', duration_ms: 100, duration_api_ms: 0, num_turns: 1, total_cost_usd: value('--resume') ? 0.2 : 0.1, modelUsage: {}, usage: { input_tokens: 12, output_tokens: 8 }, permission_denials: [], uuid: randomUUID() });
+    if (text.includes('fixture:frames')) {
+      const frame = { type: 'assistant', session_id: session, parent_tool_use_id: null, uuid: randomUUID(), message: { id: 'same-message-id', role: 'assistant', content: [{ type: 'text', text: 'first block' }] } };
+      send(frame); send(frame);
+      send({ ...frame, uuid: randomUUID(), message: { ...frame.message, content: [{ type: 'text', text: 'second block' }] } });
+      send({ ...frame, uuid: randomUUID() });
+    }
+    send({ type: 'result', subtype: 'success', session_id: text.includes('fixture:identity') ? randomUUID() : session, is_error: text.includes('fixture:allowance'), result: text.includes('fixture:allowance') ? "You've hit your session limit" : text.includes('fixture:delay') ? 'delayed fixture done' : 'fixture done', duration_ms: 100, duration_api_ms: 0, num_turns: 1, total_cost_usd: value('--resume') ? 0.2 : 0.1, modelUsage: {}, usage: { input_tokens: 12, output_tokens: 8 }, permission_denials: [], uuid: randomUUID() });
     resultSent = true;
     if (text.includes('fixture:flush-crash')) { setTimeout(() => process.exit(2), 20); return; }
     if (flushOnEof) { flush(); return; }

@@ -5,6 +5,8 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { BridgeError, NATIVE_DEFAULT, QUESTION_TOOLS, TERMINAL, type Conversation, type Effort, type Event, type Permission, type Run, type RunStatus } from './types.js';
 import { runtimePermissionsSchema, type RuntimePermissions } from './permission-options.js';
 import type { ConcurrencyLimit } from './config.js';
+import type { RunDiagnostics } from './run-diagnostics.js';
+import type { WorkspaceCheckpoint, HandoffNote } from './checkpoint.js';
 import type { RunUsage } from './usage.js';
 
 export interface CreateRunInput {
@@ -25,7 +27,7 @@ type Param = string | number | null;
 
 const ACTIVE = `status IN ('queued', 'running', 'needs_input')`;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const RUNTIME_COLUMN = `runtime TEXT NOT NULL DEFAULT 'claude' CHECK (runtime IN ('claude', 'codex'))`;
 
 // Private columns: ord gives deterministic insertion order, ack_unknown_through is the highest unknown
@@ -116,6 +118,9 @@ const toConversation = (r: Row): Conversation => ({
 });
 
 const toRun = (r: Row): Run => ({
+  diagnostics: r.diagnostics_json == null ? null : JSON.parse(r.diagnostics_json as string),
+  checkpoint: r.checkpoint_json == null ? null : JSON.parse(r.checkpoint_json as string),
+  handoff: r.handoff_json == null ? null : JSON.parse(r.handoff_json as string),
   usage: r.usage_json == null ? null : JSON.parse(r.usage_json as string),
   permissions: r.permissions_json == null ? null : runtimePermissionsSchema.parse(JSON.parse(r.permissions_json as string)),
   id: r.id as string,
@@ -188,6 +193,12 @@ export class Store {
       if (!columns.some(c => c.name === 'worker_identity')) this.db.exec('ALTER TABLE runs ADD COLUMN worker_identity TEXT');
       if (!columns.some(c => c.name === 'permissions_json')) this.db.exec('ALTER TABLE runs ADD COLUMN permissions_json TEXT');
       if (!columns.some(c => c.name === 'usage_json')) this.db.exec('ALTER TABLE runs ADD COLUMN usage_json TEXT');
+      for (const name of ['diagnostics_json', 'checkpoint_json', 'handoff_json']) {
+        if (!columns.some(c => c.name === name)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${name} TEXT`);
+      }
+      const eventColumns = this.all('PRAGMA table_info(events)');
+      if (!eventColumns.some(c => c.name === 'source_key')) this.db.exec('ALTER TABLE events ADD COLUMN source_key TEXT');
+      this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS events_source ON events(run_id, source_key) WHERE source_key IS NOT NULL');
       const conversationColumns = this.all('PRAGMA table_info(conversations)');
       if (!conversationColumns.some(c => c.name === 'runtime')) this.db.exec(`ALTER TABLE conversations ADD COLUMN ${RUNTIME_COLUMN}`);
       if (!conversationColumns.some(c => c.name === 'native_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN native_id TEXT');
@@ -210,7 +221,7 @@ export class Store {
       this.run(`DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE ${old})`, before);
       this.run(`UPDATE permissions SET input = '{}', answers = NULL WHERE run_id IN (SELECT id FROM runs WHERE ${old})`, before);
       // Keep tiny idempotency receipts and conversation identity to prevent accidental duplicate dispatch.
-      return this.run(`UPDATE runs SET prompt = '[pruned]', result = NULL WHERE ${old} AND prompt <> '[pruned]'`, before);
+      return this.run(`UPDATE runs SET prompt = '[pruned]', result = NULL, checkpoint_json = NULL, handoff_json = NULL WHERE ${old} AND (prompt <> '[pruned]' OR result IS NOT NULL OR checkpoint_json IS NOT NULL OR handoff_json IS NOT NULL)`, before);
     });
   }
 
@@ -352,6 +363,35 @@ export class Store {
     return this.run(`UPDATE runs SET heartbeat_at = ? WHERE id = ? AND worker_token = ? AND ${ACTIVE}`, this.now(), runId, token) === 1;
   }
 
+  recordDiagnostics(runId: string, token: string, patch: RunDiagnostics): boolean {
+    return this.tx(() => {
+      const run = this.getRun(runId);
+      if (run.workerToken !== token) return false;
+      return this.run('UPDATE runs SET diagnostics_json = ? WHERE id = ? AND worker_token = ?', JSON.stringify({ ...run.diagnostics, ...patch }), runId, token) === 1;
+    });
+  }
+
+  recordCheckpoint(runId: string, checkpoint: WorkspaceCheckpoint, token?: string): void {
+    const run = this.getRun(runId);
+    if (token !== undefined && run.workerToken !== token) throw new BridgeError('lease_lost', 'Worker no longer owns this run');
+    this.run('UPDATE runs SET checkpoint_json = ? WHERE id = ?', JSON.stringify(checkpoint), runId);
+  }
+
+  recordHandoff(runId: string, note: HandoffNote): void {
+    this.tx(() => {
+      this.getRun(runId);
+      for (const check of note.checks) {
+        if (check.evidenceSeq !== undefined && !this.one('SELECT 1 FROM events WHERE run_id = ? AND seq = ?', runId, check.evidenceSeq))
+          throw new BridgeError('invalid_evidence', 'Evidence must reference an event belonging to this run.');
+      }
+      this.run('UPDATE runs SET handoff_json = ? WHERE id = ?', JSON.stringify(note), runId);
+    });
+  }
+
+  recentEvents(runId: string, limit = 40): Event[] {
+    return this.all('SELECT * FROM (SELECT * FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq', runId, limitOf(limit)).map(toEvent);
+  }
+
   recordUsage(runId: string, token: string, usage: RunUsage): boolean {
     return this.run(`UPDATE runs SET usage_json = ? WHERE id = ? AND worker_token = ? AND status IN ('running', 'needs_input')`,
       JSON.stringify(usage), runId, token) === 1;
@@ -441,18 +481,34 @@ export class Store {
     });
   }
 
-  appendEvent(runId: string, type: string, data: unknown): Event {
-    const now = this.now();
-    const json = JSON.stringify(data) ?? 'null';
-    const seq = this.tx(() => {
+  appendEvent(runId: string, type: string, data: unknown, sourceKey?: string): Event {
+    if (sourceKey && (sourceKey.length > 500 || sourceKey.includes("\0"))) throw new BridgeError('invalid_argument', 'Invalid event identity');
+    return this.tx(() => {
+      if (sourceKey) {
+        const prior = this.one('SELECT * FROM events WHERE run_id = ? AND source_key = ?', runId, sourceKey);
+        if (prior) return toEvent(prior);
+      }
       if (!this.one('SELECT 1 FROM runs WHERE id = ?', runId)) throw new BridgeError('not_found', `Run ${runId} not found`);
-      return Number(this.q('INSERT INTO events (run_id, at, type, data) VALUES (?, ?, ?, ?)').run(runId, now, type, json).lastInsertRowid);
+      const at = this.now(), json = JSON.stringify(data) ?? 'null';
+      const seq = Number(this.q('INSERT INTO events (run_id, at, type, data, source_key) VALUES (?, ?, ?, ?, ?)').run(runId, at, type, json, sourceKey ?? null).lastInsertRowid);
+      return { seq, runId, at, type, data: JSON.parse(json) };
     });
-    return { seq, runId, at: now, type, data: JSON.parse(json) };
   }
 
   events(runId: string, afterSeq = 0, limit = 50): Event[] {
     return this.all('SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?', runId, afterSeq, limitOf(limit)).map(toEvent);
+  }
+
+  activeConversationRuns(conversationId: string, excludeRunId: string): Run[] {
+    return this.all(`SELECT * FROM runs WHERE conversation_id = ? AND id <> ? AND ${ACTIVE} ORDER BY ord`, conversationId, excludeRunId).map(toRun);
+  }
+
+  transcript(runId: string, afterSeq = 0, limit = 50): Event[] {
+    // A repeated native message revision replaces its previous presentation, not another message with equal text.
+    return this.all(`SELECT * FROM (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY COALESCE(json_extract(data, '$.messageKey'), CAST(seq AS TEXT)) ORDER BY seq DESC) AS revision
+      FROM events WHERE run_id = ?
+    ) WHERE revision = 1 AND seq > ? ORDER BY seq LIMIT ?`, runId, afterSeq, limitOf(limit)).map(toEvent);
   }
 
   requestCancel(runId: string): Run {

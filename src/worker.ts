@@ -8,6 +8,8 @@ import { prepareWorktree, snapshotFork } from './git.js';
 import { processIdentity, workerAlive } from './process-identity.js';
 import { appendFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
+import { captureWorkspace } from './checkpoint.js';
+import { stopReason } from './run-diagnostics.js';
 import { tolerateBusy, queueDelay } from './contention.js';
 
 async function main() {
@@ -91,6 +93,16 @@ async function main() {
     store.finishRun(runId, attached ? token : null, status, text, reason ?? code);
   } finally {
     if (timer) clearInterval(timer);
+    if (attached) {
+      try {
+        const saved = store.getRun(runId);
+        if (!runtimeStarted) store.recordDiagnostics(runId, token, { dispatch: 'not_sent', transcript: 'not_started', runtime: { pid: null, identity: null, state: 'not_started', observedAt: Date.now() } });
+        if (!saved.diagnostics?.stopReason && TERMINAL.includes(saved.status)) store.recordDiagnostics(runId, token, { stopReason: stopReason(saved.errorCode, saved.status === 'succeeded') });
+        const c = store.getConversation(saved.conversationId);
+        // Capture while this worker still exists. A takeover report will wait for its actual exit.
+        store.recordCheckpoint(runId, await captureWorkspace(c.cwd), token);
+      } catch { /* A missing checkpoint is unknown, never a clean workspace. */ }
+    }
     process.off('SIGTERM', stop); process.off('SIGINT', stop);
     store.close();
   }
