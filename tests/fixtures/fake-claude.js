@@ -36,6 +36,10 @@ input.on('line', line => {
   }
   if (event.type !== 'user') return;
   const text = typeof event.message.content === 'string' ? event.message.content : JSON.stringify(event.message.content);
+  if (text === 'fixture:steering-start') {
+    send({ type: 'system', subtype: 'init', session_id: session, model, tools: [], mcp_servers: [], permissionMode, claude_code_version: '2.1.302', uuid: randomUUID() });
+    return; // Keep the original turn live until its steering input arrives.
+  }
   flushOnEof = text.includes('fixture:flush');
   slowCancel = text.includes('fixture:slow-cancel');
   if (slowCancel) process.on('SIGTERM', () => {}); // Emulate the SDK's longer Windows EOF grace on every host.
@@ -48,7 +52,7 @@ input.on('line', line => {
       send({ ...frame, uuid: randomUUID(), message: { ...frame.message, content: [{ type: 'text', text: 'second block' }] } });
       send({ ...frame, uuid: randomUUID() });
     }
-    send({ type: 'result', subtype: 'success', session_id: text.includes('fixture:identity') ? randomUUID() : session, is_error: text.includes('fixture:allowance'), result: text.includes('fixture:allowance') ? "You've hit your session limit" : text.includes('fixture:delay') ? 'delayed fixture done' : 'fixture done', duration_ms: 100, duration_api_ms: 0, num_turns: 1, total_cost_usd: value('--resume') ? 0.2 : 0.1, modelUsage: {}, usage: { input_tokens: 12, output_tokens: 8 }, permission_denials: [], uuid: randomUUID() });
+    send({ type: 'result', subtype: 'success', user_message_uuid: event.uuid, session_id: text.includes('fixture:identity') ? randomUUID() : session, is_error: text.includes('fixture:allowance'), result: text.includes('fixture:allowance') ? "You've hit your session limit" : text.includes('fixture:delay') ? 'delayed fixture done' : 'fixture done', duration_ms: 100, duration_api_ms: 0, num_turns: 1, total_cost_usd: value('--resume') ? 0.2 : 0.1, modelUsage: {}, usage: { input_tokens: 12, output_tokens: 8 }, permission_denials: [], uuid: randomUUID() });
     resultSent = true;
     if (text.includes('fixture:flush-crash')) { setTimeout(() => process.exit(2), 20); return; }
     if (flushOnEof) { flush(); return; }

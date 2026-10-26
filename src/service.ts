@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { captureWorkspace } from './checkpoint.js';
 import { recovery, summarizeEvents } from './progress.js';
 import { Store, type CreateRunInput } from './store.js';
-import { BridgeError, CLAUDE_EFFORTS, NATIVE_DEFAULT, RUNTIMES, TERMINAL, isClaudeEffort, type Conversation, type Run, type Runtime, type StartInput, type ForkInput } from './types.js';
+import { BridgeError, CLAUDE_EFFORTS, NATIVE_DEFAULT, RUNTIMES, TERMINAL, isClaudeEffort, type Conversation, type Run, type Runtime, type StartInput, type ForkInput, type SteeringRequest } from './types.js';
 import type { Config } from './config.js';
 import { resolveBase, forkBase } from './git.js';
 import { workerAlive } from './process-identity.js';
@@ -25,6 +25,7 @@ export const startSchema = z.object({
   acknowledgeUncertain: z.boolean().optional(), runtime: z.enum(RUNTIMES).optional(),
   permissions: runtimePermissionsSchema.nullable().optional(),
 }).strict();
+export const steerSchema = startSchema.pick({ requestKey: true, prompt: true }).extend({ runId: z.string().uuid() }).strict();
 export const forkSchema = startSchema.pick({
   requestKey: true, prompt: true, model: true, effort: true, permissions: true, timeoutSeconds: true, maxTurns: true,
 }).extend({ sourceConversationId: z.string().uuid() }).strict();
@@ -58,6 +59,7 @@ export function publicRun(run: Run) {
   const { workerToken: _token, workerIdentity: _identity, fingerprint: _fingerprint, prompt: _prompt, ...visible } = run;
   return visible;
 }
+function steeringReceipt({ prompt: _prompt, ...receipt }: SteeringRequest) { return receipt; }
 type Launcher = (run: Run, token: string) => void;
 export class Bridge {
   readonly store: Store;
@@ -187,11 +189,17 @@ export class Bridge {
     child.unref();
   }
   reconcile() { return this.store.reconcile(Date.now() - this.settings.staleMs, workerAlive); }
+  steer(raw: z.input<typeof steerSchema>) {
+    requireTopLevel();
+    const input = steerSchema.parse(raw);
+    this.reconcile();
+    return steeringReceipt(this.store.requestSteering(input));
+  }
   get(runId: string, afterSeq = 0) {
     this.reconcile();
     const run = this.store.getRun(runId);
     const events = this.store.events(runId, afterSeq, 50);
-    return { run: publicRun(run), recovery: this.recovery(run), conversation: this.store.getConversation(run.conversationId), permissions: this.store.pendingPermissions(runId), events, nextCursor: events.at(-1)?.seq ?? afterSeq, mayHaveMore: events.length === 50 };
+    return { run: publicRun(run), recovery: this.recovery(run), conversation: this.store.getConversation(run.conversationId), permissions: this.store.pendingPermissions(runId), steering: this.store.recentSteering(runId).map(steeringReceipt), events, nextCursor: events.at(-1)?.seq ?? afterSeq, mayHaveMore: events.length === 50 };
   }
   private recovery(run: Run) {
     return recovery(run, undefined, undefined, this.store.activeConversationRuns(run.conversationId, run.id).map(r => r.id));
@@ -201,6 +209,7 @@ export class Bridge {
     const run = this.store.getRun(runId), c = this.store.getConversation(run.conversationId);
     const recent = this.store.recentEvents(runId, 12);
     return { runId, conversationId: c.id, runtime: c.runtime, model: run.model, effort: run.effort, status: run.status,
+      steeringOpen: run.steeringOpen, steering: this.store.recentSteering(runId).map(steeringReceipt),
       recovery: this.recovery(run), workspace: run.checkpoint ?? null, handoff: run.handoff ?? null,
       pendingInputs: this.store.pendingPermissions(runId).map(p => ({ id: p.id, tool: p.tool, reason: p.reason })),
       activity: summarizeEvents(recent), history: { tool: 'get_transcript', runId, afterSeq: 0 },

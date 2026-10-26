@@ -20,7 +20,7 @@ async function input(): Promise<string> {
 async function main() {
   const [command, arg, extra, cursor] = process.argv.slice(2);
   if (!command || command === '--help') {
-    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models [claude|codex]    List native models and effort capabilities\n  permissions [claude|codex]  Discover native permission controls\n  limits [claude|codex]    Read current account quota without inference\n  start                   Read start_run JSON from stdin\n  fork                    Read fork_conversation JSON from stdin\n  progress RUN_ID         Concise status, recovery and checkpoint\n  transcript RUN_ID [CURSOR]  Read normalized activity\n  checkpoint RUN_ID       Capture read-only Git workspace state\n  handoff RUN_ID          Read {summary, unfinishedWork, checks} JSON\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor [claude|codex]    Check the native CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code or Codex. See README for permissions and recovery.');
+    console.log('Agent Bridge\n  mcp                     Start stdio MCP server\n  models [claude|codex]    List native models and effort capabilities\n  permissions [claude|codex]  Discover native permission controls\n  limits [claude|codex]    Read current account quota without inference\n  start                   Read start_run JSON from stdin\n  fork                    Read fork_conversation JSON from stdin\n  steer RUN_ID            Read {requestKey, prompt} JSON for live input\n  progress RUN_ID         Concise status, recovery and checkpoint\n  transcript RUN_ID [CURSOR]  Read normalized activity\n  checkpoint RUN_ID       Capture read-only Git workspace state\n  handoff RUN_ID          Read {summary, unfinishedWork, checks} JSON\n  get RUN_ID [CURSOR]      Read progress/results\n  wait RUN_ID [SECONDS] [CURSOR]  Wait for new progress (up to 50s)\n  cancel RUN_ID            Request cancellation\n  answer PERMISSION_ID    Read {decision, answers?} JSON from stdin\n  runs | conversations    List saved work\n  prune [DAYS]            Remove old task content; preserve receipts\n  doctor [claude|codex]    Check the native CLI and state directory\n\nRequires Node 24+ and authenticated Claude Code or Codex. See README for permissions and recovery.');
     return;
   }
   const settings = config(false);
@@ -48,7 +48,7 @@ async function main() {
     console.log(JSON.stringify({ node: process.version, runtime, version, executable, stateDir: settings.stateDir, maxActive: settings.maxActive, authentication: `Not tested; use ${runtime === 'claude' ? 'claude auth login' : 'codex login'} if a task reports auth_required.` }, null, 2));
     return;
   }
-  if (['start', 'fork', 'cancel', 'answer', 'prune', 'checkpoint', 'handoff'].includes(command)) requireTopLevel();
+  if (['start', 'fork', 'steer', 'cancel', 'answer', 'prune', 'checkpoint', 'handoff'].includes(command)) requireTopLevel();
   const bridge = new Bridge(settings);
   if (command === 'mcp') { await serve(bridge); return; }
   try {
@@ -56,6 +56,7 @@ async function main() {
     switch (command) {
       case 'start': result = bridge.start(JSON.parse(await input())); break;
       case 'fork': result = bridge.fork(JSON.parse(await input())); break;
+      case 'steer': result = bridge.steer({ ...JSON.parse(await input()), runId: arg! }); break;
       case 'progress': result = bridge.progress(arg!); break;
       case 'transcript': result = bridge.transcript(arg!, integer(extra ?? '0')); break;
       case 'checkpoint': result = await bridge.checkpoint(arg!); break;

@@ -53,7 +53,6 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     if (!sourceMessageCount) throw new BridgeError('fork_source_missing', 'The source Claude transcript is missing or empty. No prompt was sent.');
   }
   const native = run.permissions as ClaudePermissions | null | undefined;
-  const streamed = Boolean(native || fork);
   const policy = claudePermissionPolicy(conversation, native);
   let modeMismatch = false;
   const noteModeMismatch = (applied: unknown) => {
@@ -136,15 +135,30 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
   if (conversation.fork && conversation.fork.cwd !== conversation.cwd && typeof options.systemPrompt === 'object' && options.systemPrompt && 'type' in options.systemPrompt && options.systemPrompt.type === 'preset') {
     options.systemPrompt.append += ` This conversation was forked. Earlier messages reference ${JSON.stringify(conversation.fork.cwd)}; do not read or modify that parent workspace. The assigned workspace contains a snapshot of its nonignored working files.`;
   }
-  let dispatch!: () => void; let endInput!: () => void;
+  let dispatch!: () => void;
   const gate = new Promise<void>(resolve => { dispatch = resolve; });
-  const ended = new Promise<void>(resolve => { endInput = resolve; });
+  let inputEnded = false;
+  let steeringCloseError: unknown;
+  const pendingSteers = new Set<string>();
+  const endInput = () => {
+    inputEnded = true;
+    try { store.closeSteering(run.id, token); } catch (error) { steeringCloseError = error; }
+  };
   let verified = false;
   const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
     await gate;
     if (!verified || abort.signal.aborted) return;
-    yield { type: 'user', message: { role: 'user', content: run.prompt }, parent_tool_use_id: null, session_id: conversation.id };
-    await ended;
+    yield { type: 'user', uuid: run.id as SDKUserMessage['uuid'], message: { role: 'user', content: run.prompt }, parent_tool_use_id: null, session_id: conversation.id };
+    while (!inputEnded && !abort.signal.aborted) {
+      const steering = store.claimSteering(run.id, token);
+      if (steering) {
+        pendingSteers.add(steering.id);
+        // Priority input may fold into the active tool loop or form the next
+        // native turn. Correlated results, not yielding to stdin, confirm it.
+        yield { type: 'user', uuid: steering.id as SDKUserMessage['uuid'], priority: 'now', client_composed: true,
+          message: { role: 'user', content: steering.prompt }, parent_tool_use_id: null, session_id: conversation.id };
+      } else await delay(100);
+    }
   })();
   let result: SDKResultMessage | undefined;
   let forkCompacted = false;
@@ -158,18 +172,17 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     return child;
   };
   saveDiagnostics(store, run.id, token, { dispatch: 'not_sent', shutdown: 'pending', transcript: 'not_started' });
-  const q = open({ prompt: streamed ? prompt : run.prompt, options });
+  const q = open({ prompt, options });
   // A completed native turn still needs its bounded transcript flush, even if
   // Stop or the worker deadline races the result's delivery.
-  const closeOnAbort = () => { if (!streamed || !result) q.close(); };
+  const closeOnAbort = () => { endInput(); if (!result || pendingSteers.size > 0) q.close(); };
   abort.signal.addEventListener('abort', closeOnAbort, { once: true });
   if (abort.signal.aborted) closeOnAbort();
-  let dispatched = !streamed;
-  if (dispatched) saveDiagnostics(store, run.id, token, { dispatch: 'sent', transcript: 'unverified' });
+  let dispatched = false;
   let drained = false;
   let drainDeadline: number | undefined;
   try {
-    if (streamed) {
+    {
       let setupTimer: ReturnType<typeof setTimeout> | undefined;
       let cancelSetup!: () => void;
       const stopped = new Promise<never>((_, reject) => {
@@ -218,6 +231,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
         runtimeVersion = event.claude_code_version;
         if (event.permissionMode !== policy.permissionMode) { noteModeMismatch(event.permissionMode); throw new BridgeError('unknown_outcome', 'Claude changed the selected permission mode after dispatch; tools are gated. Inspect the saved conversation before continuing.'); }
         store.appendEvent(run.id, 'started', { model: event.model, effortRequested: run.effort, effortApplied: event.effort ?? null, effortReported: event.effort !== undefined, sessionId: event.session_id, permissionsRequested: native ?? null, permissionModeApplied: event.permissionMode, policy: native ? 'native' : 'bridge-controlled' });
+        if (!inputEnded) store.openSteering(run.id, token);
       } else if (event.type === 'system' && event.subtype === 'compact_boundary' && fork) {
         forkCompacted = true;
         store.appendEvent(run.id, 'warning', { code: 'fork_history_compacted', message: 'Claude compacted the copied conversation. The child retains its compacted context rather than every original message.' });
@@ -235,14 +249,16 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
         }
       } else if (event.type === 'result') {
         if (event.session_id !== conversation.id) throw new BridgeError('session_identity_changed', 'Result belongs to a different conversation.');
+        const ids = [...(event.user_message_uuids ?? []), event.user_message_uuid];
+        for (const id of ids) if (id && pendingSteers.delete(id)) store.settleSteering(id, token, 'accepted');
         result = event;
         const nativeCode = resultErrorCode(event);
         saveDiagnostics(store, run.id, token, { terminalResultAt: Date.now(), nativeCode, stopReason: stopReason(nativeCode, !event.is_error) });
         saveUsage(store, run.id, token, claudeUsage(event, runtimeVersion));
-        store.appendEvent(run.id, 'result', { subtype: event.subtype, isError: event.is_error, durationMs: event.duration_ms, permissionDenials: event.permission_denials?.length ?? 0 });
+        store.appendEvent(run.id, 'result', { subtype: event.subtype, isError: event.is_error, durationMs: event.duration_ms, permissionDenials: event.permission_denials?.length ?? 0, userMessageIds: ids.filter(Boolean), text: 'result' in event ? event.result.slice(0, 16_000) : undefined });
         // EOF lets the CLI flush its transcript and exit normally. Do not force-kill
         // immediately after result; resume depends on the final transcript write.
-        if (streamed) { endInput(); drainDeadline ??= Date.now() + timing.drainMs; }
+        if (pendingSteers.size === 0) { endInput(); drainDeadline ??= Date.now() + timing.drainMs; }
       }
     }
   } catch (error) {
@@ -250,7 +266,7 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     if (error instanceof BridgeError) { if (completedText !== undefined) error.completedResult = completedText; throw error; }
     if (!dispatched) throw new BridgeError(fork && !native ? 'fork_setup_failed' : 'permissions_unavailable',
       `${fork && !native ? 'Claude could not prepare the fork' : 'Claude could not apply the selected permissions'} before dispatch: ${String(error).slice(0, 2000)}`);
-    if (streamed && result) throw new BridgeError('unknown_outcome', 'Claude returned a result but its session shutdown failed. Inspect the saved transcript before continuing.', completedText);
+    if (result) throw new BridgeError('unknown_outcome', 'Claude returned a result but its session shutdown failed. Inspect the saved transcript before continuing.', completedText);
     if (!result) throw new BridgeError('unknown_outcome', `Runtime ended without a trustworthy completion: ${String(error).slice(0, 2000)}`);
   } finally {
     dispatch(); endInput(); abort.signal.removeEventListener('abort', closeOnAbort);
@@ -265,6 +281,8 @@ export async function runClaude(settings: Config, store: Store, run: Run, conver
     if (closeFailed) throw new BridgeError('unknown_outcome', 'Claude runtime cleanup failed; inspect the saved session before continuing.', result && ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000));
   }
   if (modeMismatch) throw new BridgeError('unknown_outcome', 'Claude reported a different permission mode in a tool hook. Inspect the saved conversation before continuing.', result && ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000));
+  if (steeringCloseError) throw new BridgeError('unknown_outcome', 'Claude exited but Bridge could not close its steering inbox. Inspect delivery receipts before continuing.', result && ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000));
+  if (pendingSteers.size > 0) throw new BridgeError('unknown_outcome', 'Claude ended without confirming all steering messages. Inspect their receipts; do not automatically resend them.', result && ('result' in result ? result.result : result.errors.join('\n')).slice(0, 1_000_000));
   if (!result) throw new BridgeError('unknown_outcome', 'Runtime exited without a terminal result. Inspect the saved conversation before retrying.');
   if (fork) {
     try {

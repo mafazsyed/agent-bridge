@@ -36,6 +36,7 @@ export interface Conversation {
   createdAt: number;
 }
 export interface Run {
+  steeringOpen?: boolean;
   diagnostics?: RunDiagnostics | null;
   checkpoint?: WorkspaceCheckpoint | null;
   handoff?: HandoffNote | null;
@@ -63,6 +64,14 @@ export interface Run {
   cancelRequested: boolean;
   result: string | null;
   errorCode: string | null;
+}
+export interface SteerInput { runId: string; requestKey: string; prompt: string }
+export interface SteeringRequest extends SteerInput {
+  id: string;
+  status: 'pending' | 'dispatching' | 'accepted' | 'rejected' | 'unknown';
+  errorCode: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 export interface Event { seq: number; runId: string; at: number; type: string; data: unknown }
 export interface Permission {

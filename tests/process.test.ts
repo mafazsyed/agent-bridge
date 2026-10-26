@@ -54,6 +54,31 @@ test('real stdio MCP disconnect leaves its delegated worker alive', async () => 
   } finally { await client.close(); await f.cleanup(); }
 });
 
+test('a new CLI process steers the detached Claude worker once and persists its delivery receipt', async () => {
+  const f = await fixture();
+  try {
+    const first = await f.command(['start'], { requestKey: 'live', cwd: f.root, prompt: 'fixture:steering-start' });
+    const deadline = Date.now() + 10_000;
+    while (!(await f.command(['get', first.run.id])).run.steeringOpen) {
+      assert.ok(Date.now() < deadline, 'Worker did not open live input'); await delay(100);
+    }
+    const input = { requestKey: 'steering', prompt: 'fixture:flush' };
+    const receipt = await f.command(['steer', first.run.id], input);
+    assert.equal((await f.command(['steer', first.run.id], input)).id, receipt.id);
+    const done = await f.getTerminal(first.run.id);
+    assert.equal(done.run.status, 'succeeded', JSON.stringify(done));
+    assert.equal(done.steering.length, 1);
+    assert.equal(done.steering[0].status, 'accepted');
+    assert.equal((await f.command(['steer', first.run.id], input)).status, 'accepted');
+    const frames = readFileSync(f.env.AGENT_BRIDGE_FIXTURE_TRACE, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const user = frames.filter(f => f.type === 'user');
+    assert.equal(user.length, 2);
+    assert.equal(user[1].priority, 'now'); assert.equal(user[1].client_composed, true);
+    assert.equal(user[1].uuid, receipt.id);
+    assert.ok(frames.some(f => f.fixture === 'transcript_flushed'));
+  } finally { await f.cleanup(); }
+});
+
 test('detached Codex fork worker snapshots files, resumes only the child and releases failed-copy reservations', async () => {
   const f = await fixture();
   try {

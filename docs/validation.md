@@ -212,3 +212,23 @@ Real-model scripts are optional and consume the selected native account usage. L
 ## Unlimited concurrency by default (2026-10-20)
 
 The default is now `unlimited` in both configuration and direct job admission. The cross-process regression admits six independent workers using a mixture of omitted and explicit unlimited limits, while a follow-up in the same conversation waits for its earlier turn. Explicit finite limits remain supported. Existing MCP connections and workers retain their loaded setting until restarted; this change does not restart or cancel active work.
+
+## Active-run steering (2026-10-26)
+
+`steer_run` and `steer RUN_ID` use a durable, owner-fenced inbox. Schema 7 preserves existing identities and receipts; older workers are not advertised as steerable. Codex calls native `turn/steer` with the expected active turn. Claude uses priority SDK input and waits for correlated native results, including when the runtime processes additional input in a subsequent native turn.
+
+| Check | macOS | Ubuntu | Windows |
+| --- | --- | --- | --- |
+| Typecheck and build | Passed | Passed | Passed |
+| Full regression suite | 209 passed | 209 passed | 208 passed, 1 expected skip |
+| Real Claude Opus 5.5 steering and continued context | Passed | Passed | Passed |
+| Real Codex steering and continued context | Passed | Passed | Passed |
+| Final focused steering/usage checks | 9 passed | 9 passed | 9 passed |
+
+Windows skips the existing POSIX trailing-space-path test. Native versions: Claude Code 2.1.302 on Mac, 2.1.295 on Ubuntu and 2.1.303 on Windows; Codex CLI 0.163.0 on all three. Codex used its catalogue-selected `gpt-6.1-sol` model. Windows ran under the signed-in interactive desktop session using its existing isolated CLI installation. No global CLI or sandbox setting changed. GitHub Actions was not used for this increment.
+
+The live script sent a unique marker while each job was active, verified the changed answer and accepted receipt, retried the same input without duplicate dispatch, refused late input, and verified recall from a subsequent run on the same native conversation. An additional Mac native Claude check sent steering while a Bash approval was pending: the approval remained pending until the test explicitly denied it, and the final response followed the steering instruction.
+
+Regression coverage includes cross-process CLI delivery through the actual SDK transport; MCP validation and delegation-depth guard; persistence and idempotency conflicts; queued/startup/terminal refusal; owner fencing; cancellation and dead-worker reconciliation; pruning; Codex terminal/receipt races, unsupported protocol, identity mismatch and dropped transport; Claude folded and subsequent-turn results, missing correlation, cumulative-usage replacement and cleanup despite inbox failure. Accepted delivery does not establish model compliance. Unconfirmed delivery is never automatically replayed.
+
+Repeat with `AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-steering.ts` after building. This uses four short turns across both runtimes; set `AGENT_BRIDGE_LIVE_RUNTIME=claude` or `codex` for two. It writes isolated evidence beneath ignored `.local/`. Testing covers the stated versions and host configurations, not every provider model or OS policy. Both bundled delegation skills passed their validator.

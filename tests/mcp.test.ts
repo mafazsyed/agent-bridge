@@ -17,7 +17,7 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
   try {
     await server.connect(b); await client.connect(a);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'capture_checkpoint', 'fork_conversation', 'get_account_limits', 'get_progress', 'get_run', 'get_transcript', 'list_conversations', 'list_models', 'list_permission_modes', 'list_runs', 'record_handoff', 'start_run', 'wait_run']);
+    assert.deepEqual(tools.tools.map(t => t.name).sort(), ['answer_permission', 'cancel_run', 'capture_checkpoint', 'fork_conversation', 'get_account_limits', 'get_progress', 'get_run', 'get_transcript', 'list_conversations', 'list_models', 'list_permission_modes', 'list_runs', 'record_handoff', 'start_run', 'steer_run', 'wait_run']);
     const start = await client.callTool({ name: 'start_run', arguments: { requestKey: 'mcp-fixture', prompt: 'Review', cwd: root } });
     assert.equal(start.isError, undefined);
     const payload = (start.structuredContent as any).result;
@@ -43,6 +43,10 @@ test('MCP advertises lifecycle tools and executes real handler/schema paths', as
     assert.equal(mixed.isError, true);
     bridge.store.attachWorker(payload.run.id, 'fixture', process.pid);
     bridge.store.claimRun(payload.run.id, 'fixture');
+    bridge.store.openSteering(payload.run.id, 'fixture');
+    const steered = await client.callTool({ name: 'steer_run', arguments: { runId: payload.run.id, requestKey: 'steer', prompt: 'Focus on tests' } });
+    assert.equal((steered.structuredContent as any).result.status, 'pending');
+    assert.equal((await client.callTool({ name: 'steer_run', arguments: { runId: payload.run.id, requestKey: 'bad-steer', prompt: 'test', permissions: null } })).isError, true);
     const permission = bridge.store.requestPermission(payload.run.id, 'fixture', 'AskUserQuestion', { questions: [{ question: 'Which colour?' }] }, 'fixture');
     const waiting = await client.callTool({ name: 'wait_run', arguments: { runId: payload.run.id, seconds: 0 } });
     assert.equal((waiting.structuredContent as any).result.permissions[0].id, permission.id);

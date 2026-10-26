@@ -28,6 +28,27 @@ test('Codex discovery reads all native model pages without creating a thread', a
   try { await client.initialize(); assert.equal((await codexModels(client))[0]?.model, 'native-model'); await client.close(); assert.equal(f.events().filter(e => e.method?.startsWith('thread/') || e.method?.startsWith('turn/')).length, 0); }
   finally { await client.close(); f.clean(); }
 });
+for (const [scenario, expected] of [['steer-ok', 'accepted'], ['steer-race', 'accepted'], ['steer-refused', 'rejected'], ['steer-unsupported', 'rejected'], ['steer-wrong-id', 'unknown'], ['steer-drop', 'unknown']]) test(`Codex real stdio steering: ${scenario}`, async () => {
+  const f = setup(scenario!);
+  const work = runCodex(f.settings, f.bridge.store, f.run, f.conversation, 'fixture', f.abort, f.open);
+  void work.catch(() => {});
+  try {
+    const deadline = Date.now() + 5000;
+    while (!f.bridge.store.getRun(f.run.id).steeringOpen) { if (Date.now() > deadline) throw new Error('No active turn'); await delay(10); }
+    const input = { runId: f.run.id, requestKey: 'live-steer', prompt: 'Focus on tests now' };
+    const receipt = f.bridge.steer(input);
+    assert.equal(f.bridge.steer(input).id, receipt.id);
+    if (scenario === 'steer-drop') await assert.rejects(work);
+    else await work;
+    assert.equal(f.bridge.store.getSteering(receipt.id).status, expected);
+    assert.equal(f.events().filter(e => e.method === 'turn/start').length, 1);
+    const sends = f.events().filter(e => e.method === 'turn/steer');
+    assert.equal(sends.length, 1);
+    assert.deepEqual(sends[0].params, { threadId: 'native-thread', expectedTurnId: 'native-turn', input: [{ type: 'text', text: input.prompt, text_elements: [] }] });
+    assert.equal(f.bridge.store.getRun(f.run.id).steeringOpen, false);
+    assert.throws(() => f.bridge.steer({ ...input, requestKey: 'too-late' }), { code: 'not_steerable' });
+  } finally { f.abort.abort(); await work.catch(() => {}); f.clean(); }
+});
 test('Codex account limit probe uses real stdio without creating threads or leaking identity', async () => {
   const f = setup('limits');
   try {

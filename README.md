@@ -104,6 +104,7 @@ Ask your MCP-enabled agent to delegate a review to Opus. It can use:
 | `list_permission_modes` | Discover native permission controls without submitting a prompt |
 | `get_account_limits` | Read current native account quota windows without inference |
 | `start_run` | Start a job or queue a follow-up on a conversation |
+| `steer_run` | Add instructions to a running job, with a saved delivery receipt |
 | `fork_conversation` | Branch an idle conversation into independent native history and send its first prompt |
 | `get_run` | Read status, results, pending input and raw event pages |
 | `get_progress` | Concise progress, stop reason, exit evidence and handoff readiness |
@@ -226,6 +227,29 @@ A new conversation saves its initial selection. Follow-ups can override `permiss
 
 Broad access is opt-in through the explicit selection. Host agents must have the human's authorization for that access; a worker or repository cannot grant it. There is no second confirmation checkbox. A worktree does not confine shell commands, and Claude bypass or Codex full access can affect resources outside it. User/organization restrictions can still refuse a selection. Permission discovery is not a guarantee of account quota or every model's capabilities.
 
+## Steer a running job
+
+Use `steer_run` when you want to adjust work that is already underway:
+
+```json
+{
+  "runId": "<active run ID>",
+  "requestKey": "focus-tests-1",
+  "prompt": "Focus on the failing tests first. Leave the documentation for later."
+}
+```
+
+Check `steeringOpen` in `get_run` or `get_progress` first. It becomes true once the worker is ready to receive live input. The CLI equivalent is `node dist/cli.js steer RUN_ID`, with `{ "requestKey": "…", "prompt": "…" }` on stdin.
+
+- **Codex:** uses native `turn/steer`, pinned to the exact active turn. It does not start a second turn.
+- **Claude:** sends priority input through the existing live SDK session. Claude can incorporate it at a safe point or continue on its next native turn. Bridge waits for results correlated with the added messages before completing the job.
+
+The initial receipt is `pending`, then `dispatching`. Inspect the recent `steering` receipts in `get_run` / `get_progress`, or repeat the exact same request key and input: `accepted` means the native runtime acknowledged the input (Codex) or included it in a correlated result (Claude). It does not guarantee the model followed the instruction. `rejected` means it was not delivered; `unknown` means delivery could not be confirmed. Inspect uncertain delivery instead of automatically resending it. The transcript records the added instructions and receipt changes.
+
+Retries with the same request key never dispatch twice. Steering that loses the race with completion is refused; it is never silently moved to another run. Startup, queued and completed jobs do not accept steering. Use a deliberate `start_run` follow-up for those. Existing jobs started by older Bridge workers need to finish before this feature becomes available.
+
+Steering keeps the existing model, permissions, workspace and overall deadline. It does not answer a pending approval or question, change native limits, or undo earlier actions. Use `answer_permission` or `cancel_run` for those controls. Claude's `maxTurns` retains its native per-turn meaning when live input produces another native turn. For those jobs, `run.usage.turn` describes the latest native turn; cumulative usage remains the latest native snapshot and is never added across results.
+
 ## Parallel jobs, model changes and forks
 
 Multiple conversations can use different runtimes, models, effort levels and permission selections. `AGENT_BRIDGE_MAX_ACTIVE` accepts any positive safe integer or `unlimited` (the default); there is no four-job ceiling. Additional jobs queue when a finite limit is reached. A job waiting for approval occupies a slot. Turns within one conversation remain serialized even with unlimited concurrency. Configure the same limit in every client sharing that state directory. After updating an existing installation, restart its MCP connections to load the new default; already-running workers keep their launch-time setting. Workers cannot recursively delegate through Bridge. Every queued job has a worker process, and every active job also starts a native runtime; choose concurrency to suit your machine and account quota. Queued polling backs off with jitter, and brief SQLite contention is retried within the lease window.
@@ -280,7 +304,7 @@ The limits probe starts no inference, consumes no job slot, changes no conversat
 ## Lifetimes and recovery
 
 - A **conversation** retains its runtime, native session identity, workspace and mode. It survives completed jobs and can be resumed in that runtime's CLI. Codex's `nativeId` is distinct from the bridge conversation ID.
-- A **run** is one submitted turn. Follow-ups queue in insertion order; only one turn runs per conversation.
+- A **run** is one submitted job, including any live steering. Claude may process steering across native turns within that job. Follow-up jobs queue in insertion order; only one job runs per conversation.
 - A detached **worker process** owns a run and updates its lease. Closing the MCP connection does not normally stop the worker. Independent conversations run concurrently by default; set `AGENT_BRIDGE_MAX_ACTIVE` to bound concurrency.
 - `needs_input` means a real pending question or permission request. A five-minute deadline expires unanswered requests. Cancellation and expired answers cannot authorize later execution.
 - `succeeded` means the runtime returned a successful terminal result. Verify its claims against files/tests; it is not an independent correctness verdict.
@@ -335,7 +359,7 @@ There is no exactly-once execution guarantee, no promise that work survives a ma
 
 The local SQLite ledger stores prompts, results, progress, command descriptions, checkpoints, handoff notes, permission input and workspace paths. It may contain sensitive task content. State directory and file modes are private on POSIX; Windows access depends on the user's filesystem ACLs. Point the state variable only at a dedicated directory: the bridge applies private directory permissions. The bridge adds no telemetry and does not log authentication environment values. Claude has its own data handling and authentication policies.
 
-`node dist/cli.js prune 30` removes bridge task content older than 30 days, retaining small idempotency receipts, conversation identities and fork lineage. It does not delete worktrees or native transcripts. SQLite page reclamation is not secure erasure. Schema 6 adds the reporting fields without changing run IDs or idempotency keys. Let active jobs finish before updating and restart host MCP connections afterwards; older binaries cannot open a ledger upgraded to schema 6.
+`node dist/cli.js prune 30` removes bridge task content, including steering text, older than 30 days, retaining small idempotency receipts, conversation identities and fork lineage. It does not delete worktrees or native transcripts. SQLite page reclamation is not secure erasure. Schema 7 adds steering receipts without changing run IDs or existing idempotency keys. Let active jobs finish before updating and restart host MCP connections afterwards; older binaries cannot open a ledger upgraded to schema 7.
 
 To retire a write conversation, first confirm it has no queued, running or waiting runs, inspect its worktree and preserve or integrate any wanted changes. From the source repository, use `git worktree remove "<saved cwd>"`, then `git branch -d "<saved branch>"`. These commands refuse dirty worktrees or unmerged branches; inspect a refusal instead of forcing deletion. Do not resume a retired conversation. Its ledger record and small readiness receipt remain; automatic worktree retirement is not implemented yet.
 
@@ -350,6 +374,7 @@ AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-control.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-codex.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-claude-to-codex.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-fork.ts
+AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-steering.ts
 AGENT_BRIDGE_LIVE=1 node --import tsx scripts/live-progress.ts
 ```
 

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
@@ -8,6 +8,7 @@ import type { ConcurrencyLimit } from './config.js';
 import type { RunDiagnostics } from './run-diagnostics.js';
 import type { WorkspaceCheckpoint, HandoffNote } from './checkpoint.js';
 import type { RunUsage } from './usage.js';
+import type { SteerInput, SteeringRequest } from './types.js';
 
 export interface CreateRunInput {
   permissions?: RuntimePermissions | null;
@@ -27,7 +28,7 @@ type Param = string | number | null;
 
 const ACTIVE = `status IN ('queued', 'running', 'needs_input')`;
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const RUNTIME_COLUMN = `runtime TEXT NOT NULL DEFAULT 'claude' CHECK (runtime IN ('claude', 'codex'))`;
 
 // Private columns: ord gives deterministic insertion order, ack_unknown_through is the highest unknown
@@ -98,6 +99,19 @@ CREATE TABLE IF NOT EXISTS permissions (
   consumed INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS permissions_one_pending ON permissions(run_id) WHERE decision = 'pending';
+CREATE TABLE IF NOT EXISTS steering_requests (
+  ord INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  request_key TEXT NOT NULL UNIQUE,
+  fingerprint TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'dispatching', 'accepted', 'rejected', 'unknown')),
+  error_code TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS steering_run ON steering_requests(run_id, status, ord);
 `;
 
 const toConversation = (r: Row): Conversation => ({
@@ -118,6 +132,7 @@ const toConversation = (r: Row): Conversation => ({
 });
 
 const toRun = (r: Row): Run => ({
+  steeringOpen: r.steering_open === 1,
   diagnostics: r.diagnostics_json == null ? null : JSON.parse(r.diagnostics_json as string),
   checkpoint: r.checkpoint_json == null ? null : JSON.parse(r.checkpoint_json as string),
   handoff: r.handoff_json == null ? null : JSON.parse(r.handoff_json as string),
@@ -193,6 +208,7 @@ export class Store {
       if (!columns.some(c => c.name === 'worker_identity')) this.db.exec('ALTER TABLE runs ADD COLUMN worker_identity TEXT');
       if (!columns.some(c => c.name === 'permissions_json')) this.db.exec('ALTER TABLE runs ADD COLUMN permissions_json TEXT');
       if (!columns.some(c => c.name === 'usage_json')) this.db.exec('ALTER TABLE runs ADD COLUMN usage_json TEXT');
+      if (!columns.some(c => c.name === 'steering_open')) this.db.exec('ALTER TABLE runs ADD COLUMN steering_open INTEGER NOT NULL DEFAULT 0');
       for (const name of ['diagnostics_json', 'checkpoint_json', 'handoff_json']) {
         if (!columns.some(c => c.name === name)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${name} TEXT`);
       }
@@ -220,6 +236,7 @@ export class Store {
       const old = `status IN ('succeeded', 'failed', 'cancelled', 'unknown') AND finished_at < ?`;
       this.run(`DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE ${old})`, before);
       this.run(`UPDATE permissions SET input = '{}', answers = NULL WHERE run_id IN (SELECT id FROM runs WHERE ${old})`, before);
+      this.run(`UPDATE steering_requests SET prompt = '[pruned]' WHERE run_id IN (SELECT id FROM runs WHERE ${old})`, before);
       // Keep tiny idempotency receipts and conversation identity to prevent accidental duplicate dispatch.
       return this.run(`UPDATE runs SET prompt = '[pruned]', result = NULL, checkpoint_json = NULL, handoff_json = NULL WHERE ${old} AND (prompt <> '[pruned]' OR result IS NOT NULL OR checkpoint_json IS NOT NULL OR handoff_json IS NOT NULL)`, before);
     });
@@ -511,11 +528,93 @@ export class Store {
     ) WHERE revision = 1 AND seq > ? ORDER BY seq LIMIT ?`, runId, afterSeq, limitOf(limit)).map(toEvent);
   }
 
+  requestSteering(input: SteerInput): SteeringRequest {
+    const fingerprint = createHash('sha256').update(JSON.stringify([input.runId, input.prompt])).digest('hex');
+    return this.tx(() => {
+      const prior = this.one('SELECT * FROM steering_requests WHERE request_key = ?', input.requestKey);
+      if (prior) {
+        if (prior.fingerprint !== fingerprint) throw new BridgeError('idempotency_conflict', 'This steering requestKey already identifies different input.');
+        return this.toSteering(prior);
+      }
+      const run = this.getRun(input.runId);
+      if (!['running', 'needs_input'].includes(run.status) || run.cancelRequested || !run.steeringOpen) {
+        throw new BridgeError('not_steerable', 'This run is not accepting live input. Wait for steeringOpen, or use start_run for a deliberate follow-up after completion.');
+      }
+      const id = randomUUID(), now = this.now();
+      this.run(`INSERT INTO steering_requests (id, run_id, request_key, fingerprint, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`, id, input.runId, input.requestKey, fingerprint, input.prompt, now, now);
+      this.steeringEvent(id);
+      return this.getSteering(id);
+    });
+  }
+
+  getSteering(id: string): SteeringRequest {
+    const row = this.one('SELECT * FROM steering_requests WHERE id = ?', id);
+    if (!row) throw new BridgeError('not_found', `Steering request ${id} not found`);
+    return this.toSteering(row);
+  }
+
+  recentSteering(runId: string): SteeringRequest[] {
+    return this.all('SELECT * FROM (SELECT * FROM steering_requests WHERE run_id = ? ORDER BY ord DESC LIMIT 50) ORDER BY ord', runId).map(r => this.toSteering(r));
+  }
+
+  openSteering(runId: string, token: string): boolean {
+    return this.run(`UPDATE runs SET steering_open = 1 WHERE id = ? AND worker_token = ? AND status IN ('running', 'needs_input') AND cancel_requested = 0`, runId, token) === 1;
+  }
+
+  closeSteering(runId: string, token: string): void {
+    this.tx(() => {
+      if (!this.one('SELECT 1 FROM runs WHERE id = ? AND worker_token = ?', runId, token)) return;
+      this.closeSteeringInside(runId, false);
+    });
+  }
+
+  claimSteering(runId: string, token: string): SteeringRequest | null {
+    // Idle pollers should not compete for SQLite's writer lock.
+    if (!this.one("SELECT 1 FROM steering_requests WHERE run_id = ? AND status = 'pending' LIMIT 1", runId)) return null;
+    return this.tx(() => {
+      if (!this.one(`SELECT 1 FROM runs WHERE id = ? AND worker_token = ? AND steering_open = 1 AND status IN ('running', 'needs_input') AND cancel_requested = 0`, runId, token)) return null;
+      const next = this.one("SELECT id FROM steering_requests WHERE run_id = ? AND status = 'pending' ORDER BY ord LIMIT 1", runId);
+      if (!next) return null;
+      this.run("UPDATE steering_requests SET status = 'dispatching', updated_at = ? WHERE id = ?", this.now(), next.id as string);
+      this.steeringEvent(next.id as string);
+      return this.getSteering(next.id as string);
+    });
+  }
+
+  settleSteering(id: string, token: string, status: 'accepted' | 'rejected' | 'unknown', errorCode: string | null = null): void {
+    this.tx(() => {
+      // A terminal event can race the native receipt. Keep the original owner's
+      // receipt authoritative until its adapter exits; never replay dispatching work.
+      const changed = this.run(`UPDATE steering_requests SET status = ?, error_code = ?, updated_at = ? WHERE id = ? AND status = 'dispatching' AND run_id IN (SELECT id FROM runs WHERE worker_token = ?)`, status, errorCode, this.now(), id, token);
+      if (changed) this.steeringEvent(id);
+    });
+  }
+
+  private toSteering(r: Row): SteeringRequest {
+    return { id: r.id as string, runId: r.run_id as string, requestKey: r.request_key as string, prompt: r.prompt as string,
+      status: r.status as SteeringRequest['status'], errorCode: r.error_code as string | null, createdAt: r.created_at as number, updatedAt: r.updated_at as number };
+  }
+
+  private steeringEvent(id: string): void {
+    const request = this.getSteering(id);
+    const { prompt, ...receipt } = request;
+    this.run('INSERT INTO events (run_id, at, type, data) VALUES (?, ?, ?, ?)', request.runId, this.now(), 'steering', JSON.stringify({ ...receipt, ...(request.status === 'pending' ? { text: prompt } : {}) }));
+  }
+
+  private closeSteeringInside(runId: string, settleDispatched: boolean): void {
+    this.run('UPDATE runs SET steering_open = 0 WHERE id = ?', runId);
+    for (const row of this.all(`SELECT id, status FROM steering_requests WHERE run_id = ? AND (status = 'pending' OR (? = 1 AND status = 'dispatching'))`, runId, settleDispatched ? 1 : 0)) {
+      this.run('UPDATE steering_requests SET status = ?, error_code = ?, updated_at = ? WHERE id = ?', row.status === 'pending' ? 'rejected' : 'unknown', row.status === 'pending' ? 'run_closed' : 'delivery_unconfirmed', this.now(), row.id as string);
+      this.steeringEvent(row.id as string);
+    }
+  }
+
   requestCancel(runId: string): Run {
     const now = this.now();
     this.tx(() => {
       this.run(`UPDATE runs SET cancel_requested = 1, updated_at = ? WHERE id = ? AND ${ACTIVE} AND cancel_requested = 0`, now, runId);
       this.run(`UPDATE runs SET status = 'cancelled', error_code = 'cancelled', finished_at = ?, updated_at = ? WHERE id = ? AND status = 'queued' AND worker_token IS NULL`, now, now, runId);
+      this.closeSteeringInside(runId, false);
     });
     return this.getRun(runId);
   }
@@ -537,6 +636,7 @@ export class Store {
         status, result, errorCode, now, now, runId, ...(token === null ? [] : [token]),
       );
       if (changed === 0) return false;
+      this.closeSteeringInside(runId, true);
       this.run(`UPDATE permissions SET decision = 'expired' WHERE run_id = ? AND decision = 'pending'`, runId);
       return true;
     });
@@ -552,7 +652,10 @@ export class Store {
       for (const run of candidates) {
         const neverStarted = run.status === 'queued';
         const count = this.run(`UPDATE runs SET status = ?, error_code = ?, finished_at = ?, updated_at = ? WHERE id = ? AND ${ACTIVE} AND COALESCE(heartbeat_at, created_at) < ? AND worker_token IS ?`, neverStarted ? 'failed' : 'unknown', neverStarted ? 'worker_start_lost' : 'worker_lost', now, now, run.id, staleBefore, run.workerToken);
-        if (count) this.run(`UPDATE permissions SET decision = 'expired' WHERE decision = 'pending' AND run_id = ?`, run.id);
+        if (count) {
+          this.run(`UPDATE permissions SET decision = 'expired' WHERE decision = 'pending' AND run_id = ?`, run.id);
+          this.closeSteeringInside(run.id, true);
+        }
         changed += count;
       }
       return changed;

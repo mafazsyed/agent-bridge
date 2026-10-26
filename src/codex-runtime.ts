@@ -12,6 +12,7 @@ import { codexModels } from './codex-models.js';
 import { isDeepStrictEqual } from 'node:util';
 import { codexPermissionOptions, type CodexPermissionOptions } from './permission-options.js';
 import { codexUsage, saveUsage, type RunUsage } from './usage.js';
+import { steeringPump } from './steering.js';
 
 export interface RuntimeResult { text: string; success: boolean; errorCode: string | null }
 const questionMethod = 'item/tool/requestUserInput';
@@ -118,6 +119,22 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
   let resolveTerminal!: (p: any) => void; let rejectTerminal!: (e: Error) => void;
   const terminal = new Promise<any>((resolve, reject) => { resolveTerminal = resolve; rejectTerminal = reject; });
   void terminal.catch(() => {});
+  const steering = steeringPump(store, run.id, token, abort.signal, async request => {
+    if (finished || !threadId || !turnId) return { status: 'rejected', errorCode: 'run_closed' };
+    const expectedTurnId = turnId;
+    try {
+      const receipt = await client.request('turn/steer', { threadId, expectedTurnId,
+        input: [{ type: 'text', text: request.prompt, text_elements: [] }] }, 10_000);
+      return receipt.turnId === expectedTurnId ? { status: 'accepted' } : { status: 'unknown', errorCode: 'steering_identity_mismatch' };
+    } catch (error) {
+      // Only protocol/validation refusals prove no input was accepted. A dropped
+      // connection, timeout or internal error can follow a successful dispatch.
+      if (error instanceof CodexRpcError && [-32600, -32601, -32602].includes(error.rpcCode)) {
+        return { status: 'rejected', errorCode: error.rpcCode === -32601 ? 'steering_unsupported' : 'steering_refused' };
+      }
+      return { status: 'unknown', errorCode: 'delivery_unconfirmed' };
+    }
+  }, rejectTerminal);
   const messages = new Map<string, { text: string; phase: string | null }>();
   const permissions = new CodexPermissions(store, run, conversation, token, abort.signal, () => ({ threadId, turnId, dispatched }));
   client.onRequest = (method, p, id) => permissions.handle(method, p, id);
@@ -141,7 +158,7 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
       if (item?.type === 'agentMessage') { messages.set(item.id, { text: item.text, phase: item.phase }); store.appendEvent(run.id, 'text', { text: item.text.slice(0, 16_000), truncated: item.text.length > 16_000, messageKey: `codex:${eventTurn}:${item.id}` }, `codex:${eventTurn}:${item.id}:${createHash('sha256').update(item.text).digest('hex')}`); }
       else if (item?.type === 'commandExecution' || item?.type === 'fileChange') store.appendEvent(run.id, 'tool', { tool: item.type, itemId: item.id, status: item.status, ...(item.type === 'commandExecution' ? { command: item.command, cwd: item.cwd } : {}), ...(item.exitCode == null ? {} : { exitCode: item.exitCode }) }, `codex-tool:${eventTurn}:${item.id}`);
     }
-    if (method === 'turn/completed') resolveTerminal(p);
+    if (method === 'turn/completed') { finished = true; steering.close(); resolveTerminal(p); }
   };
   let interruptTimer: ReturnType<typeof setTimeout> | undefined;
   const interrupt = () => {
@@ -230,6 +247,7 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
       sandboxPolicy: response.sandbox, input: [{ type: 'text', text: run.prompt, text_elements: [] }] });
     if (typeof started.turn?.id !== 'string' || (turnId && turnId !== started.turn.id)) throw new BridgeError('session_identity_changed', 'Codex returned a different turn identity.');
     turnId = started.turn.id;
+    if (!finished) steering.open();
     if (abort.signal.aborted) { clearTimeout(interruptTimer); interruptTimer = undefined; interrupt(); }
     const completion = await Promise.race([terminal, client.failure]);
     if (completion.threadId !== threadId || completion.turn?.id !== turnId) throw new BridgeError('session_identity_changed', 'Codex completion belongs to another turn.');
@@ -250,6 +268,7 @@ export async function runCodex(settings: Config, store: Store, run: Run, convers
     if (dispatched && !finished && !(error instanceof BridgeError && error.code === 'session_identity_changed')) throw new BridgeError('unknown_outcome', `Codex turn may have executed: ${String(error).slice(0, 2000)}`);
     throw error;
   } finally {
+    await steering.drain();
     clearTimeout(interruptTimer); abort.signal.removeEventListener('abort', interrupt);
     await client.close();
     const exited = await waitForExit?.();

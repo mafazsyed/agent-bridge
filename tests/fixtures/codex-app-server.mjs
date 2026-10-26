@@ -49,6 +49,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
       notify('turn/started', { threadId, turn: { id: turnId, status: 'inProgress' } });
       if (scenario === 'early-complete') { complete(); reply(m, { turn: { id: turnId } }); break; }
       reply(m, { turn: { id: turnId } });
+      if (scenario.startsWith('steer-')) break;
       if (scenario.startsWith('stop-')) {
         notify('turn/completed', { threadId, turn: { id: turnId, status: 'failed', items: [], error: { codexErrorInfo: scenario.slice(5) } } }); break;
       }
@@ -83,6 +84,17 @@ createInterface({ input: process.stdin }).on('line', async line => {
       }
       if (scenario === 'unknown-request') { const answer = await ask('future/request', {}); appendFileSync(record, JSON.stringify({ unknownAnswer: answer }) + '\n'); }
       complete(); break;
+    }
+    case 'turn/steer': {
+      if (scenario === 'steer-drop') { process.exit(1); break; }
+      if (scenario === 'steer-refused') send({ id: m.id, error: { code: -32600, message: 'No active turn' } });
+      else if (scenario === 'steer-unsupported') send({ id: m.id, error: { code: -32601, message: 'Unsupported' } });
+      else {
+        if (scenario === 'steer-race') complete();
+        reply(m, { turnId: scenario === 'steer-wrong-id' ? 'other-turn' : turnId });
+      }
+      if (scenario !== 'steer-race') complete();
+      break;
     }
     case 'turn/interrupt': reply(m, {}); if (scenario !== 'stuck-cancel') complete('interrupted'); break;
   }

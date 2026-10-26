@@ -241,3 +241,8 @@ test('diagnostics storage failure cannot mask a Claude result or prevent its dra
   const done = await runFixture(null, async (_options, f) => { f.bridge.store.recordDiagnostics = () => { throw new Error('Disk unavailable'); }; });
   assert.equal(done.drained, true); assert.equal(done.closed, true);
 });
+test('steering inbox failure cannot prevent Claude runtime cleanup', async () => {
+  await assert.rejects(runFixture(null, async (_options, f) => {
+    f.bridge.store.closeSteering = () => { throw new Error('Disk unavailable'); };
+  }), (error: any) => error.code === 'unknown_outcome' && error.closed === true && error.completedResult === 'done');
+});
