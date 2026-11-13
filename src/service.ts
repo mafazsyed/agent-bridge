@@ -13,6 +13,7 @@ import type { Config } from './config.js';
 import { resolveBase, forkBase } from './git.js';
 import { workerAlive } from './process-identity.js';
 import { runtimePermissionsSchema, validatePermissions } from './permission-options.js';
+import { validateWorkerScope } from './worker-scope.js';
 
 // The parsed input is the idempotency fingerprint: keep existing keys in order, append new optional keys
 // without defaults, so requests that omit them hash exactly as before.
@@ -24,6 +25,7 @@ export const startSchema = z.object({
   timeoutSeconds: z.number().int().min(10).max(7200).optional(), maxTurns: z.number().int().min(1).max(100).optional(),
   acknowledgeUncertain: z.boolean().optional(), runtime: z.enum(RUNTIMES).optional(),
   permissions: runtimePermissionsSchema.nullable().optional(),
+  scope: z.enum(['workspace', 'host']).optional(),
 }).strict();
 export const steerSchema = startSchema.pick({ requestKey: true, prompt: true }).extend({ runId: z.string().uuid() }).strict();
 export const forkSchema = startSchema.pick({
@@ -82,8 +84,13 @@ export class Bridge {
       throw new BridgeError('immutable_conversation', `A follow-up continues its saved ${saved.runtime} conversation. Omit runtime or start a new conversation.`);
     }
     const runtime = saved?.runtime ?? input.runtime ?? 'claude';
+    const scope = saved?.scope ?? input.scope ?? 'workspace';
+    if (saved && input.scope !== undefined && input.scope !== (saved.scope ?? 'workspace')) {
+      throw new BridgeError('immutable_conversation', 'Scope is fixed when a conversation starts. Start a new conversation to change scope.');
+    }
     const permissions = input.permissions === undefined ? saved?.permissions ?? null : input.permissions;
     validatePermissions(permissions, runtime, saved?.mode ?? input.mode ?? 'review');
+    validateWorkerScope(scope, runtime, saved?.mode ?? input.mode ?? 'review', permissions);
     if (!executableFor(this.settings, runtime)) {
       throw new BridgeError('cli_missing', runtime === 'codex'
         ? 'Install Codex and run codex login (or set AGENT_BRIDGE_CODEX_PATH) before starting a new Codex run. Saved work remains available.'
@@ -113,7 +120,7 @@ export class Bridge {
       const base = mode === 'write' ? resolveBase(source, input.baseRef!) : null;
       const defaults = runtime === 'codex' ? { model: NATIVE_DEFAULT, effort: NATIVE_DEFAULT } : { model: 'claude-opus-5-5', effort: 'high' };
       conversation = {
-        id, runtime, permissions, nativeId: null, cwd: mode === 'write' ? join(realpathSync.native(this.settings.stateDir), 'worktrees', id) : source,
+        id, runtime, permissions, scope, nativeId: null, cwd: mode === 'write' ? join(realpathSync.native(this.settings.stateDir), 'worktrees', id) : source,
         sourceCwd: base?.repo ?? source, mode, model: input.model ?? defaults.model, effort: input.effort ?? defaults.effort,
         baseCommit: base?.commit ?? null, branch: mode === 'write' ? `agent-bridge/${id}` : null,
         sessionInitialized: false, createdAt: Date.now(),
@@ -142,6 +149,7 @@ export class Bridge {
     const { conversation: source, run: checkpoint } = this.store.forkSource(input.sourceConversationId);
     const permissions = input.permissions === undefined ? source.permissions ?? null : input.permissions;
     validatePermissions(permissions, source.runtime, source.mode);
+    validateWorkerScope(source.scope ?? 'workspace', source.runtime, source.mode, permissions);
     if (!executableFor(this.settings, source.runtime)) throw new BridgeError('cli_missing', `Install and sign in to the native ${source.runtime} CLI before forking.`);
     if (source.runtime === 'claude' && input.effort !== undefined && !isClaudeEffort(input.effort)) throw new BridgeError('invalid_effort', `Claude effort must be one of ${CLAUDE_EFFORTS.join(', ')}.`);
     if (source.runtime === 'codex' && input.maxTurns !== undefined) throw new BridgeError('unsupported_option', 'maxTurns is not supported for Codex; use timeoutSeconds.');

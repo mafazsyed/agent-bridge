@@ -28,7 +28,7 @@ type Param = string | number | null;
 
 const ACTIVE = `status IN ('queued', 'running', 'needs_input')`;
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const RUNTIME_COLUMN = `runtime TEXT NOT NULL DEFAULT 'claude' CHECK (runtime IN ('claude', 'codex'))`;
 
 // Private columns: ord gives deterministic insertion order, ack_unknown_through is the highest unknown
@@ -115,6 +115,7 @@ CREATE INDEX IF NOT EXISTS steering_run ON steering_requests(run_id, status, ord
 `;
 
 const toConversation = (r: Row): Conversation => ({
+  scope: (r.scope ?? 'workspace') as Conversation['scope'],
   fork: r.fork_json == null ? null : JSON.parse(r.fork_json as string),
   permissions: r.permissions_json == null ? null : runtimePermissionsSchema.parse(JSON.parse(r.permissions_json as string)),
   id: r.id as string,
@@ -220,6 +221,7 @@ export class Store {
       if (!conversationColumns.some(c => c.name === 'native_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN native_id TEXT');
       if (!conversationColumns.some(c => c.name === 'permissions_json')) this.db.exec('ALTER TABLE conversations ADD COLUMN permissions_json TEXT');
       if (!conversationColumns.some(c => c.name === 'fork_json')) this.db.exec('ALTER TABLE conversations ADD COLUMN fork_json TEXT');
+      if (!conversationColumns.some(c => c.name === 'scope')) this.db.exec("ALTER TABLE conversations ADD COLUMN scope TEXT NOT NULL DEFAULT 'workspace' CHECK (scope IN ('workspace', 'host'))");
       this.db.exec("CREATE INDEX IF NOT EXISTS conversations_fork_source ON conversations(json_extract(fork_json, '$.conversationId'))");
       this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS conversations_native ON conversations(runtime, native_id)');
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -257,6 +259,7 @@ export class Store {
       let ackThrough: number | null = null;
       if (this.one('SELECT 1 FROM conversations WHERE id = ?', c.id)) {
         const saved = this.getConversation(c.id);
+        if ((saved.scope ?? 'workspace') !== (c.scope ?? 'workspace')) throw new BridgeError('immutable_conversation', 'Conversation scope cannot change.');
         if (saved.fork && !saved.sessionInitialized) throw new BridgeError('fork_not_ready', 'The fork has not bound its native history. Wait for its first run; if setup failed, inspect it and submit a new fork.');
         if (this.one(`SELECT 1 FROM conversations c JOIN runs r ON r.conversation_id = c.id
           WHERE json_extract(c.fork_json, '$.conversationId') = ? AND c.session_initialized = 0 AND r.${ACTIVE}`, c.id)) {
@@ -276,9 +279,9 @@ export class Store {
       } else {
         if (c.fork) this.assertForkCheckpoint(c);
         this.run(
-          `INSERT INTO conversations (id, runtime, native_id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at, permissions_json, fork_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          c.id, c.runtime, c.nativeId, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt, c.permissions ? JSON.stringify(c.permissions) : null, c.fork ? JSON.stringify(c.fork) : null,
+          `INSERT INTO conversations (id, runtime, native_id, cwd, source_cwd, mode, model, effort, base_commit, branch, session_initialized, created_at, permissions_json, fork_json, scope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          c.id, c.runtime, c.nativeId, c.cwd, c.sourceCwd, c.mode, c.model, c.effort, c.baseCommit, c.branch, c.sessionInitialized ? 1 : 0, c.createdAt, c.permissions ? JSON.stringify(c.permissions) : null, c.fork ? JSON.stringify(c.fork) : null, c.scope ?? 'workspace',
         );
       }
       const id = randomUUID();

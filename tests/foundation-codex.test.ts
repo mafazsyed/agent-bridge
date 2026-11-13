@@ -118,6 +118,7 @@ test('a version 1 ledger migrates in place, keeps Claude identity and accepts ex
   const store = new Store(dir);
   try {
     const c = store.getConversation(conversationId);
+    assert.equal(c.scope, 'workspace');
     assert.deepEqual([c.runtime, c.nativeId, c.model, c.effort, c.sessionInitialized], ['claude', null, 'claude-opus-5-5', 'high', true]);
     assert.equal(store.getRun(runId).result, 'legacy result');
   } finally { store.close(); }
@@ -125,7 +126,7 @@ test('a version 1 ledger migrates in place, keeps Claude identity and accepts ex
 
   const db = new DatabaseSync(join(dir, 'bridge.sqlite'));
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 7);
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 8);
     assert.match(String(db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'conversations_native'`).get()?.sql), /UNIQUE INDEX .*\(runtime, native_id\)/);
     assert.throws(() => db.prepare(`UPDATE conversations SET runtime = 'other'`).run(), /CHECK constraint/);
   } finally { db.close(); }
@@ -141,7 +142,7 @@ test('a version 1 ledger migrates in place, keeps Claude identity and accepts ex
   } finally { bridge.close(); }
 
   const newer = new DatabaseSync(join(dir, 'bridge.sqlite'));
-  newer.exec('PRAGMA user_version = 8');
+  newer.exec('PRAGMA user_version = 9999');
   newer.close();
   assert.throws(() => new Store(dir), code('schema_too_new'));
 });

@@ -64,13 +64,13 @@ test('runtime schemas reject cross keys, unknown aliases, incomplete granular po
 });
 
 async function runFixture(permissions: RuntimePermissions | null, work: (options: Options, f: ReturnType<typeof setup>, runId: string) => Promise<void>, override: {
-  applied?: string; initMode?: string; setError?: boolean; autoSupported?: boolean; unknownModel?: boolean; hooksApplied?: boolean;
+  scope?: 'workspace' | 'host'; applied?: string; initMode?: string; setError?: boolean; autoSupported?: boolean; unknownModel?: boolean; hooksApplied?: boolean;
   setupHang?: 'initialize' | 'models' | 'mode' | 'reinitialize'; cancelSetup?: boolean; drainHang?: boolean; abortDuringDrain?: boolean; failedResult?: boolean; drainError?: boolean; closeError?: boolean;
 } = {}) {
   const f = setup();
   const submitted = f.bridge.start({ requestKey: randomUUID(), prompt: 'fixture', cwd: f.root });
   const run = { ...f.bridge.store.getRun(submitted.run.id), permissions };
-  const conversation = { ...submitted.conversation, mode: 'write' as const };
+  const conversation = { ...submitted.conversation, mode: 'write' as const, scope: override.scope };
   f.bridge.store.attachWorker(run.id, 'fixture', process.pid); f.bridge.store.claimRun(run.id, 'fixture');
   let received = false, closed = false, drained = false, options!: Options;
   const abort = new AbortController();
@@ -245,4 +245,19 @@ test('steering inbox failure cannot prevent Claude runtime cleanup', async () =>
   await assert.rejects(runFixture(null, async (_options, f) => {
     f.bridge.store.closeSteering = () => { throw new Error('Disk unavailable'); };
   }), (error: any) => error.code === 'unknown_outcome' && error.closed === true && error.completedResult === 'done');
+});
+
+
+test('Claude host scope reaches native options and hooks while retaining the selected approval mode', async () => {
+  await runFixture({ runtime: 'claude', permissionMode: 'acceptEdits' }, async (options, f) => {
+    assert.equal(options.permissionMode, 'acceptEdits');
+    assert.equal(options.allowDangerouslySkipPermissions, undefined);
+    const prompt = options.systemPrompt as { append: string };
+    assert.match(prompt.append, /human owner has authorized work outside/);
+    assert.doesNotMatch(prompt.append, /Stay within|Do not push/);
+    assert.deepEqual(await hook(options, 'Write', { file_path: join(f.root, '..', 'host-file.txt') }, 'acceptEdits'), {});
+    assert.deepEqual(await hook(options, 'Bash', { command: 'service fixture restart', run_in_background: true }, 'acceptEdits'), {});
+    assert.equal((await hook(options, 'Write', { file_path: join(f.root, '..', '.codex', 'config.toml') }, 'acceptEdits') as any).hookSpecificOutput.permissionDecision, 'deny');
+    assert.equal((await hook(options, 'Agent', {}, 'acceptEdits') as any).hookSpecificOutput.permissionDecision, 'deny');
+  }, { scope: 'host' });
 });

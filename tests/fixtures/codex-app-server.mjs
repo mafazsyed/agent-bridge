@@ -70,10 +70,10 @@ createInterface({ input: process.stdin }).on('line', async line => {
         if (scenario === 'resolved') setTimeout(() => notify('serverRequest/resolved', { threadId, requestId: next }), 80);
         appendFileSync(record, JSON.stringify({ decision: await answer }) + '\n');
       }
-      if (['file', 'patch-updated', 'empty-patch', 'patch-pending'].includes(scenario)) {
+      if (['file', 'file-host-root', 'patch-updated', 'empty-patch', 'patch-pending'].includes(scenario)) {
         notify('item/started', { threadId, turnId, item: { id: 'patch', type: 'fileChange', changes: scenario === 'empty-patch' ? [] : [{ path: 'file.txt', diff: '+hello' }] } });
         if (scenario === 'patch-updated') notify('item/fileChange/patchUpdated', { threadId, turnId, itemId: 'patch', changes: [{ path: 'new.txt', diff: '+updated' }] });
-        const requested = ask('item/fileChange/requestApproval', { threadId, turnId, itemId: 'patch' });
+        const requested = ask('item/fileChange/requestApproval', { threadId, turnId, itemId: 'patch', ...(scenario === 'file-host-root' ? { grantRoot: process.cwd() + '/..' } : {}) });
         if (scenario === 'patch-pending') setTimeout(() => notify('item/fileChange/patchUpdated', { threadId, turnId, itemId: 'patch', changes: [{ path: 'changed.txt', diff: '+not approved' }] }), 80);
         const answer = await requested;
         appendFileSync(record, JSON.stringify({ fileDecision: answer }) + '\n');

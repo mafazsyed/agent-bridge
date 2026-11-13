@@ -3,6 +3,7 @@ import type { WorkspaceCheckpoint, HandoffNote } from './checkpoint.js';
 import type { RuntimePermissions } from './permission-options.js';
 import type { RunUsage } from './usage.js';
 export type Mode = 'review' | 'write';
+export type WorkerScope = 'workspace' | 'host';
 export type Runtime = 'claude' | 'codex';
 export const RUNTIMES = ['claude', 'codex'] as const satisfies readonly Runtime[];
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -17,6 +18,8 @@ export const QUESTION_TOOLS: readonly string[] = ['AskUserQuestion', 'codex.user
 export type RunStatus = 'queued' | 'running' | 'needs_input' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export const TERMINAL: readonly RunStatus[] = ['succeeded', 'failed', 'cancelled', 'unknown'];
 export interface Conversation {
+  // Immutable authorization scope; older conversations default to workspace.
+  scope?: WorkerScope;
   // Immutable source checkpoint. Native history is copied, not the Bridge approval ledger.
   fork?: { conversationId: string; runId: string; nativeId: string; cwd: string; branch?: string | null; sourceBaseCommit?: string | null; turnId?: string | null; snapshotTree?: string | null } | null;
   // Null/omitted preserves the original controlled-delegation behavior.
@@ -86,6 +89,7 @@ export interface Permission {
   answers: Record<string, string> | null;
 }
 export interface StartInput {
+  scope?: WorkerScope;
   permissions?: RuntimePermissions | null;
   requestKey: string;
   prompt: string;

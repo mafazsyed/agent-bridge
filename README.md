@@ -171,6 +171,35 @@ With omitted/default Bridge permissions, every Claude Bash command requires a on
 
 **A worktree is not a sandbox.** An approved shell command can access outside it, use the network and run repository scripts. Git checkout can invoke configured filters in the explicitly selected trusted repository. Tool checks are not an OS security boundary against other local processes or filesystem races. Explicit native bypass/full-access selections remove ordinary approval or sandbox protections, as described below.
 
+### Work outside the workspace
+
+`scope` is a separate, explicit authorization choice on a new `start_run`:
+
+- `"workspace"` (the default) keeps the worker instructed to stay in its assigned worktree. Full-access permissions alone do not change this.
+- `"host"` allows work outside that directory **only as authorized by the human task**: other checkouts, remote hosts, pushes, merges, deployments and service management. Native permissions and approval policies still apply. Delegation and agent configuration changes remain excluded.
+
+Host scope requires `mode: "write"` and its normal Git `baseRef`; the worktree is still the starting directory. For Codex, also select `permissions.sandbox: "danger-full-access"` explicitly. Claude Plan mode is incompatible; its other native modes retain their own approval behavior. With Bridge-controlled Claude permissions, shell commands still require approval. Host-scoped file hooks allow outside paths while protecting Git metadata and agent configuration. Codex continues to rely on its native controls rather than Claude's file hooks.
+
+```json
+{
+  "requestKey": "authorized-host-maintenance-1",
+  "runtime": "codex",
+  "cwd": "/path/to/project",
+  "mode": "write",
+  "baseRef": "HEAD",
+  "scope": "host",
+  "permissions": {
+    "runtime": "codex",
+    "sandbox": "danger-full-access",
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user"
+  },
+  "prompt": "Perform the host maintenance explicitly authorized by the human, then report changes and validation."
+}
+```
+
+Scope is saved on the conversation, inherited by follow-ups and forks, and cannot be changed in place. Start a new conversation to widen or narrow it. Follow-up and fork permission overrides must remain compatible with the saved scope. Existing conversations migrate to workspace scope. Retrying an older submission keeps its original receipt. Services intentionally started on another host may outlive worker cancellation; the worker must report them in its handoff.
+
 ### Native permission selection
 
 `mode` and `permissions` control different things:

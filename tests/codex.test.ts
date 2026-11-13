@@ -202,3 +202,44 @@ test('diagnostics storage failure cannot mask a Codex result or prevent runtime 
     assert.equal(result.success, true); assert.ok(client?.child.exitCode !== null || client?.child.signalCode !== null);
   } finally { f.clean(); }
 });
+
+
+for (const scope of ['workspace', 'host'] as const) test(`Codex full access does not imply host scope: ${scope}`, async () => {
+  const f = setup('early-complete', 'write');
+  const permissions = { runtime: 'codex', sandbox: 'danger-full-access', approvalPolicy: 'on-request', approvalsReviewer: 'user' } as const;
+  try {
+    await runCodex(f.settings, f.bridge.store, { ...f.run, permissions }, { ...f.conversation, scope }, 'fixture', f.abort, f.open);
+    const params = f.events().find(e => e.method === 'thread/start').params;
+    assert.equal(params.sandbox, 'danger-full-access'); assert.equal(params.approvalPolicy, 'on-request');
+    if (scope === 'host') { assert.match(params.developerInstructions, /human owner has authorized work outside/); assert.doesNotMatch(params.developerInstructions, /Stay within|Do not push/); }
+    else assert.match(params.developerInstructions, /Stay within the assigned workspace/);
+    assert.match(params.developerInstructions, /modify agent configuration/);
+    assert.equal((f.bridge.store.events(f.run.id).find(e => e.type === 'started')!.data as any).scope, scope);
+  } finally { f.clean(); }
+});
+test('Codex refuses an incompatible host scope before opening its runtime', async () => {
+  const f = setup('early-complete', 'write');
+  try {
+    await assert.rejects(runCodex(f.settings, f.bridge.store, f.run, { ...f.conversation, scope: 'host' }, 'fixture', f.abort, () => { throw new Error('must not open'); }), { code: 'invalid_scope' });
+    assert.deepEqual(f.events(), []);
+  } finally { f.clean(); }
+});
+
+
+for (const scope of ['workspace', 'host'] as const) test(`Codex outside patch approval root respects scope and remains one-shot: ${scope}`, async () => {
+  const f = setup('file-host-root', 'write');
+  const permissions = { runtime: 'codex', sandbox: 'danger-full-access', approvalPolicy: 'on-request', approvalsReviewer: 'user' } as const;
+  const work = runCodex(f.settings, f.bridge.store, { ...f.run, permissions }, { ...f.conversation, scope }, 'fixture', f.abort, f.open);
+  void work.catch(() => {});
+  try {
+    if (scope === 'host') {
+      const deadline = Date.now() + 5000;
+      while (!f.bridge.store.pendingPermissions(f.run.id).length) { if (Date.now() > deadline) throw new Error('No patch approval'); await delay(10); }
+      const pending = f.bridge.store.pendingPermissions(f.run.id)[0]!;
+      assert.equal(pending.tool, 'codex.fileChange');
+      f.bridge.store.answerPermission(pending.id, 'allow');
+    }
+    await work;
+    assert.deepEqual(f.events().find(e => e.fileDecision).fileDecision, { decision: scope === 'host' ? 'accept' : 'decline' });
+  } finally { f.abort.abort(); await work.catch(() => {}); f.clean(); }
+});
