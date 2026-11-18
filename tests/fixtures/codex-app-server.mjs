@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 const [scenario, record] = process.argv.slice(2);
@@ -25,7 +25,14 @@ createInterface({ input: process.stdin }).on('line', async line => {
       features: { apps: false, plugins: false, hooks: false, memories: false, multi_agent: false, multi_agent_v2: false, request_permissions_tool: false, code_mode: { enabled: false }, remote_control: false, js_repl: false, browser_use: false, computer_use: false, remote_plugin: false, plugin_hooks: false, skill_search: false, skill_mcp_dependency_install: false },
       skills: { bundled: { enabled: false }, include_instructions: false }, web_search: 'disabled',
       mcp_servers: { 'bridge.with.dot': { command: 'must-not-start' } } } }); break;
-    case 'model/list': reply(m, { data: m.params.cursor ? [] : [model], nextCursor: m.params.cursor ? null : 'page2' }); break;
+    case 'model/list': {
+      if (scenario === 'catalogue-refresh') {
+        const models = JSON.parse(readFileSync(record + '.models.json', 'utf8'));
+        const offset = m.params.cursor ? Number(m.params.cursor) : 0;
+        reply(m, { data: models.slice(offset, offset + 1), nextCursor: offset + 1 < models.length ? String(offset + 1) : null });
+      } else reply(m, { data: m.params.cursor ? [] : [model], nextCursor: m.params.cursor ? null : 'page2' });
+      break;
+    }
     case 'thread/goal/get': {
       if (scenario === 'goal-unsupported') { send({ id: m.id, error: { code: -32601, message: 'unsupported method' } }); break; }
       reply(m, { goal: scenario === 'goal-active' ? { threadId: m.params.threadId, status: 'active' } : null }); break;

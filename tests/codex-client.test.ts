@@ -2,12 +2,12 @@ import test from 'node:test';
 import { execFile, execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { CodexClient } from '../src/codex-client.js';
-import { codexModels } from '../src/codex-models.js';
+import { codexModels, discoverCodexModels } from '../src/codex-models.js';
 const fixture = fileURLToPath(new URL('./fixtures/codex-app-server.mjs', import.meta.url));
 test('Codex RPC errors retain the native code independently of message wording', async () => {
   const root = mkdtempSync(join(tmpdir(), 'bridge-rpc-'));
@@ -65,4 +65,37 @@ test('a hard owner exit kills its detached Codex process tree', async () => {
     for (let n = 0; n < 100 && executing(); n++) await delay(20);
     assert.equal(executing(), false);
   } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
+
+test('Codex discovery refreshes all pages and automatically exposes new model IDs and native effort levels', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-catalogue-refresh-'));
+  const record = join(root, 'rpc.jsonl'), catalogFile = record + '.models.json';
+  const settings = { stateDir: 'unused', executable: '', codexExecutable: process.execPath, maxActive: 1, staleMs: 120_000 };
+  const clients: CodexClient[] = [], directories: string[] = [];
+  const model = (id: string, efforts: string[]) => ({ id, model: id, displayName: id, description: 'Runtime metadata', isDefault: false,
+    defaultReasoningEffort: efforts[0], supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })) });
+  const probe = () => discoverCodexModels(settings, { open: (exe, cwd) => {
+    directories.push(cwd);
+    const client = new CodexClient(exe, cwd, { args: [fixture, 'catalogue-refresh', record] }); clients.push(client); return client;
+  } });
+  try {
+    writeFileSync(catalogFile, JSON.stringify([model('gpt-6.1-sol', ['low', 'high'])]));
+    assert.deepEqual((await probe()).models.map(m => m.value), ['gpt-6.1-sol']);
+    writeFileSync(catalogFile, JSON.stringify([model('gpt-6.2-sol', ['low', 'high', 'ultra']), model('gpt-6.2-astra', ['medium', 'max'])]));
+    const updated = await probe();
+    assert.deepEqual(updated.models.map(m => m.value), ['gpt-6.2-sol', 'gpt-6.2-astra']);
+    assert.deepEqual(updated.models.map(m => m.supportedEffortLevels), [['low', 'high', 'ultra'], ['medium', 'max']]);
+    // No release-specific model or effort allowlist: future runtime metadata also passes through.
+    writeFileSync(catalogFile, JSON.stringify([model('future-runtime-model', ['new-runtime-effort'])]));
+    const future = await probe();
+    assert.equal(future.models[0]!.value, 'future-runtime-model');
+    assert.equal(future.models[0]!.defaultEffort, 'new-runtime-effort');
+    assert.deepEqual(future.models[0]!.supportedEffortLevels, ['new-runtime-effort']);
+    const messages = readFileSync(record, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(messages.filter(m => m.method === 'initialize').length, 3);
+    assert.deepEqual(messages.filter(m => m.method === 'model/list').map(m => m.params.cursor), [null, null, '1', null]);
+    assert.equal(messages.some(m => /^(turn|thread|account)\//.test(m.method)), false, 'Discovery sends no prompts, creates no history and reads no account details');
+    assert.ok(directories.every(dir => !existsSync(dir)), 'Each neutral discovery directory is cleaned up');
+  } finally { await Promise.all(clients.map(client => client.close())); rmSync(root, { recursive: true, force: true }); }
 });
